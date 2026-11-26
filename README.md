@@ -1,64 +1,110 @@
 # Thread Atlas
 
-Find the AI thread you were working in, inspect its latest reply, and send a follow-up to that original conversation. Thread Atlas runs on your computer and groups Codex, Claude Code, ChatGPT, and Claude conversations by project. English is the default. The sidebar also supports Korean.
+Thread Atlas is a local workspace for conversations from Codex, Claude Code, ChatGPT, and Claude. Organize threads into project folders, catch up on replies, and continue a conversation from the dashboard. The interface supports English and Korean.
 
-![Thread Atlas running against synthetic browser fixtures](docs/dashboard.png)
+![Thread Atlas Work map with nested projects, red and blue update markers, and the Main chat activity panel](docs/dashboard.png)
 
-## Run locally
+*The screenshots use sample threads and to-dos.*
 
-On macOS, double-click **Start.command** or run it in a terminal. It starts a loopback server, opens the authenticated dashboard, and uses the locked Python dependencies when uv is installed. Python 3.9+ is required for the fallback installer. The originals of your conversations stay in their source applications.
+## Get started
+
+On macOS, double-click **Start.command** in the checkout or run it from a terminal. The launcher starts the local server and opens the dashboard. It uses the locked dependencies when uv is installed. The fallback installer requires Python 3.9 or later.
 
 ```sh
 ./Start.command
 ```
 
-The [v0.1.0 release](https://github.com/ainta/thread-atlas/releases/tag/v0.1.0) includes a locally built Apple Silicon menu-bar app. It uses the same Python runtime and is ad-hoc signed. For a native build on your own Mac, build and open the bundle. Building requires the Xcode command line tools. The menu can reopen the dashboard or reveal the extension folder. The collector continues running after you close the dashboard.
+On Linux, run the following from the checkout.
+
+```sh
+uv sync --frozen
+uv run python -m atlas
+```
+
+Add `--no-open` to start the collector without opening a browser. Rerun the launcher to reopen the dashboard.
+
+The [v0.1.0 release](https://github.com/ainta/thread-atlas/releases/tag/v0.1.0) includes an ad-hoc-signed Apple Silicon menu-bar app. To build the current checkout as a macOS app, install the Xcode command line tools and run the following. The menu can reopen the dashboard or reveal the extension folder. The collector keeps running when you close the browser tab.
 
 ```sh
 ./macos/build.sh
 open "build/Thread Atlas.app"
 ```
 
-On Linux, run `uv sync --frozen` followed by `uv run python -m atlas`. Use `--no-open` for a headless collector. To open an existing dashboard, run the launcher again. Its private launch URL is stored in the app data directory.
-
 ## Connect your conversations
 
-| Source | Discover and read | Send to the original |
+| Source | Read | Reply |
 | --- | --- | --- |
-| Codex | Watches local transcripts. **Connections → Import Codex history** adds interactive threads from the local App Server. | Uses the signed-in local App Server daemon over its Unix socket. A busy thread must finish its current turn. |
-| Claude Code | Indexes local project transcripts and watches for new replies. | Resumes the exact session ID in its original working directory. A session owned by another terminal is protected from concurrent writes. |
-| ChatGPT web | Import conversations JSON or ZIP exports. The Chrome extension tracks selected open conversations. | Available in a connected tab when **Allow replies to this thread** is enabled and the page exposes a usable composer. |
-| Claude web | Import Claude chat exports or track open conversations through the extension. | Uses the same opt-in tab mechanism, with a source-specific message reader. |
+| Codex | Reads local transcripts. **Connections → Import Codex history** also indexes threads from the signed-in local App Server. | Sends to the original thread through the App Server when the thread is available. |
+| Claude Code | Reads local project transcripts. | Resumes the session in its original working directory. A session open in another terminal is protected from concurrent writes. |
+| ChatGPT and Claude | Import an export or track selected open Chrome tabs. | Sends through a connected tab with **Allow replies to this thread** enabled. |
 
-For Codex, keep the local App Server daemon running. On versions with daemon management, use `codex app-server daemon start` if it is stopped. Claude Code requires a signed-in CLI with `claude agents --json` support. Source visibility depends on the local profile and retained transcripts.
+Keep the local Codex App Server daemon running. On versions with daemon management, use `codex app-server daemon start` if it is stopped. Claude Code replies require a signed-in CLI with `claude agents --json` support.
 
-**For web history**, open **Connections**, pick a provider and account label, and select an exported JSON or ZIP. Re-importing a known message does not create a second copy. ChatGPT imports use the current conversation branch when supplied in the export.
+**Import a snapshot.** In **Connections**, choose a provider and account label, then select a JSON or ZIP export. Reuse the same label on later imports so Thread Atlas can match existing conversations. With a new ChatGPT export ZIP in Downloads, click **Refresh ChatGPT** to import additions and see the count of new chats and messages.
 
-**For live web tabs**, open `chrome://extensions`, enable Developer mode, click **Load unpacked**, and select this repository’s `extension` folder. Reload an existing source tab after installing. In the dashboard’s **Connections**, copy the pairing key. Open the extension on a ChatGPT or Claude conversation, paste the key, and use the same label as your imports. **Track open chats** pairs currently open conversations for reading. To send, enable replies on the individual tab. A full page reload, a changed conversation URL, or a disconnected tab can require reconnecting it. An export is a snapshot. Closed web chats do not receive live monitoring through this extension.
+**Track a live tab.** In Chrome, open `chrome://extensions`, enable Developer mode, and use **Load unpacked** on this checkout's `extension` directory. Reload the source tab once after installation. Copy the pairing key from **Connections**, paste it into the extension, and enter the same account label you use for imports. Click **Track open chats**. Enable **Allow replies to this thread** on each tab where you want to send messages. A navigation or disconnect can require reconnecting the tab.
 
-## Use the workspace
+## Set up the Work map
 
-- Create a top-level project with **New project**. The **Work map** shows projects as expandable folders with sessions and subprojects underneath. Use a project's **⋯** menu to add a subproject or move the entire branch.
-- Newly discovered or imported sessions go into **Unclassified**. Move them to any project from the Work map or session details.
-- Drag a project name in the sidebar or work map onto another project to move its whole branch. Drop it on **Work map** in the sidebar to return it to the top level.
-- Use **Move up** or **Move down** in a project's **⋯** menu to reorder folders at the same level. Thread Atlas saves the order for the sidebar and Work map.
-- Open a session to set its **Workspace status**. **Default** and **Active** appear in the Work map, and the **Active** view focuses on sessions you marked. **Hidden** stays in its project and appears with **Show hidden**. **Will not consider** removes it from the tree, inbox, and routing. Restore puts it back in its previous project.
-- Set a **Folder status** from its **⋯** menu. Active folders and their visible contents appear in **Active**. Hidden folders are revealed in place with **Show hidden**. Branches marked **Will not consider** can be restored with each session's own status.
-- Drag a card into a project, onto **Hidden**, or onto the composer to pin a reply target. Use card details for equivalent move and hide controls.
-- Ask **“Where did we leave the payment retry policy?”** to retrieve a source message. Type **“Then run the tests”** to continue it. The destination appears before you send. Ambiguous requests offer candidates. **Find** and **Send to thread** let you explicitly select an intent.
-- **Inbox** shows latest replies. **Reply here** pins the thread, while simply opening a source shows its history. New replies do not redirect a draft.
-- Enable **Local notifications** under Connections to receive macOS notifications while the collector runs. Allow **Thread Atlas Alerts** when macOS asks. Clicking a banner opens that specific reply in the local inbox. The release bundles the notification helper. Running from source on macOS builds it once using the Xcode command line tools. Optional Telegram notifications use the environment variables `ATLAS_TELEGRAM_TOKEN` and `ATLAS_TELEGRAM_CHAT` supplied at launch. Only the thread title is sent. Delivery to Telegram needs a configured bot and recipient.
-- Delivery receipts distinguish queued, sending, delivered, answered, failed, and uncertain. After an uncertain send, inspect the original thread before submitting a new draft.
+The first-run setup offers **Research**, **Life**, and **Study**. You can edit the starter folders, add subfolders, or skip setup. **Unclassified** collects threads without a clear match. New ChatGPT threads can be filed into an existing folder when their topic matches.
 
-## Data and configuration
+For example, you might keep a benchmark thread three levels deep.
 
-The server binds to `127.0.0.1:43821`. Its private SQLite database, pairing credential, and launch URL live in `~/Library/Application Support/Thread Atlas` on macOS and under `$XDG_DATA_HOME/Thread Atlas` on Linux. Use `--port`, `--data`, `--codex-dir`, or `--claude-dir` to override the defaults. The map layout and read positions persist in SQLite. Draft text, language, reply target, and the main-chat search history persist in the dashboard's browser storage. Use separate browser profiles and account labels to distinguish identities.
+```text
+Research
+└── Model evaluation
+    └── Benchmark suite
+        └── Payment retry policy
+```
 
-The web extension reads visible message elements, communicates with the paired loopback service, and never needs account cookies or API keys. DOM controls can change with provider updates. The extension refuses to overwrite a nonempty composer or treat a button click alone as proof of delivery.
+Drag a thread onto a folder to move it. Drag a folder onto another folder to move the entire branch, or drop it on **Work map** in the sidebar to move it to the top level. A folder's **⋯** menu also lets you add a subproject or move the folder up or down among its siblings.
+
+| Status | Where it appears |
+| --- | --- |
+| **Default** | Work map |
+| **Active** | Work map, Active, and automatic matching in Main chat |
+| **Hidden** | Hidden, or its original folder when **Show hidden** is on |
+| **Will not consider** | Its own sidebar view, with a **Restore** action |
+
+Set a thread's status from its card or details. Use the folder's **⋯** menu to set status for a branch. Visible threads in an active folder are eligible for automatic matching.
+
+Open a thread and click **Rename** to give it a workspace title that survives sync. **Use original title** switches back to the source title. The trash-can button moves a thread to **Trash**, where you can restore it. **Undo** reverses the last 10 workspace edits one at a time, including renames, folder moves, and status changes.
+
+## Catch up and reply
+
+1. Open **Updates** to see only threads that need a look. Red marks an unread reply, and blue marks a newly added thread. Parent folders inherit the highest-priority marker. Inside a folder, red items come first, then blue.
+2. Click a thread to see its history, or click **✓ Mark as read** to clear its marker from the card. The checkmark also appears on unread replies in **Inbox** and **Main chat → Activity**.
+3. Click **Reply here** to send from the thread window. **Open original** follows a linked web conversation or opens a local Codex thread in the desktop app. For a read-only thread, use **Copy draft**.
+
+In the right panel, use **Activity** to filter replies by source or thread. Choose a **Destination** to follow up without opening the thread. **Conversation** shows what you sent and any replies that came back.
+
+| In Main chat | Example |
+| --- | --- |
+| **Find** with **Match active threads** | “Where did we leave the payment retry policy?” |
+| **Send to thread** with **Match active threads** | “Summarize the payment retry tests.” |
+| **Send to thread** with a specific **Destination** | Select **Payment retry policy** and type “Try a backoff of 500 ms.” |
+
+**Auto** chooses between finding and sending. Thread Atlas matches titles, project names, and recent replies, then previews the destination. It asks you to choose when the match is unclear. A specific destination can be any visible thread.
+
+![Main chat showing a found reply and the destination preview for a follow-up](docs/main-chat.png)
+
+## Keep project to-dos
+
+Click the yellow checklist icon next to a folder to open its memo. For example, the **Research** memo shows its own checklist and the tasks under **Model evaluation → Benchmark suite**, indented by folder. **All to-dos** opens a memo for the entire Work map.
+
+![Yellow Research checklist with indented tasks from Model evaluation and Benchmark suite](docs/project-todos.png)
+
+Check tasks off in the memo, or click **Open in To-dos** to add and organize them in the full view. Drag a task's **⠿** handle above or below another task to reorder it, or drop it on a different folder to move it. Click the handle for a project and position picker. **Undo** also works for to-do changes.
+
+## Notifications and local data
+
+Turn on **Local notifications** in **Connections** and allow **Thread Atlas Alerts** when macOS asks. Clicking a banner opens the exact reply. Optional Telegram notifications use `ATLAS_TELEGRAM_TOKEN` and `ATLAS_TELEGRAM_CHAT` and send the thread title. Delivery receipts show whether a follow-up was queued, sent, answered, failed, or could not be confirmed.
+
+The dashboard binds to `127.0.0.1:43821`. On macOS, the SQLite database, launch URL, and pairing credential are stored in `~/Library/Application Support/Thread Atlas`. On Linux, the default is `~/.local/share/Thread Atlas`, or `$XDG_DATA_HOME/Thread Atlas` when set. The database holds thread history, project layout, read markers, titles, and to-dos. The dashboard browser profile holds drafts, language, the reply target, and Main chat history. Use `--port`, `--data`, `--codex-dir`, or `--claude-dir` to override defaults.
+
+The Chrome extension reads visible conversation content in the tabs you connect. It talks to the loopback server with the pairing key. It protects an existing draft in the source composer and waits for evidence of delivery.
 
 ## Verification
-
-[Verification report](docs/VERIFICATION.md) · [Original-thread receipts](docs/live-receipts.json) · [English design](docs/DESIGN.md) · [한국어 설계](docs/DESIGN.ko.md)
 
 ```sh
 uv sync --frozen
@@ -69,8 +115,10 @@ uv run playwright install chromium
 uv run python scripts/browser_test.py
 ```
 
-The browser test launches an isolated Chromium profile, loads the actual extension, and uses local fixtures in place of the two provider websites. An additional opt-in test uses your authenticated models, creates four disposable conversations, and consumes model usage.
+The browser suite runs in an isolated Chromium profile with fixture pages for the web providers. The opt-in live suite uses authenticated providers, creates four disposable conversations, and consumes model usage.
 
 ```sh
 uv run python scripts/live_test.py --live
 ```
+
+[English design](docs/DESIGN.md) · [한국어 설계](docs/DESIGN.ko.md) · [Verification notes](docs/VERIFICATION.md) · [Original-thread receipts](docs/live-receipts.json)
