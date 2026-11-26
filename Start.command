@@ -1,7 +1,11 @@
 #!/bin/sh
 set -eu
+export PYTHONDONTWRITEBYTECODE=1
 cd "$(dirname "$0")"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+case "$PWD" in
+  *.app/Contents/Resources/workspace) ATLAS_RUNTIME=${ATLAS_RUNTIME:-"$HOME/Library/Application Support/Thread Atlas/runtime"} ;;
+esac
 if [ -n "${ATLAS_RUNTIME:-}" ]; then
   mkdir -p "$ATLAS_RUNTIME"
   export UV_PROJECT_ENVIRONMENT="$ATLAS_RUNTIME"

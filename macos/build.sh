@@ -7,7 +7,7 @@ workspace="$contents/Resources/workspace"
 mkdir -p "$contents/MacOS" "$workspace"
 swiftc "$root/macos/main.swift" -framework AppKit -o "$contents/MacOS/ThreadAtlas"
 for file in atlas public extension Start.command pyproject.toml uv.lock; do
-  /usr/bin/rsync -a --exclude '__pycache__' "$root/$file" "$workspace/"
+  /usr/bin/rsync -a --delete-excluded --exclude '__pycache__' "$root/$file" "$workspace/"
 done
 cat > "$contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
