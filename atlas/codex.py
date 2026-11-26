@@ -45,12 +45,18 @@ class Codex:
             raise
 
     async def __aexit__(self, *args):
-        if self.ws:
-            await self.ws.close()
-        if self.reader:
-            await self.reader
-        if self.http:
-            await self.http.close()
+        try:
+            if self.ws:
+                await self.ws.close()
+            if self.reader:
+                # A listener failure has already failed the calls that were waiting on it; it must not replace the caller's result.
+                try:
+                    await self.reader
+                except Exception:
+                    pass
+        finally:
+            if self.http:
+                await self.http.close()
 
     async def listen(self):
         try:

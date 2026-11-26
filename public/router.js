@@ -10,10 +10,12 @@ export function route(text,items,focus,mode='auto',locked=false){
   const lookup=/^(?:find|show|where|what happened|what is|what.s|which|how far|any updates|status\b)|어디|찾아|최근|상태.*알려|어떻게 됐/i.test(text.trim());
   const action=mode==='send'||(mode==='auto'&&!waiting&&!lookup);
   if(mode!=='send'&&waiting)return {action:false,candidates:visible.filter(i=>i.state==='wait'),waiting:true};
+  // An explicit reply target wins over any provider name the message happens to mention.
+  const pinned=visible.find(i=>i.id===focus);
+  if(locked&&pinned&&action)return {action,candidates:[pinned]};
   const provider=[['Claude Code',/claude\s*code|클로드\s*코드/i],['ChatGPT',/chatgpt|챗지피티/i],['Codex',/codex|코덱스/i],['Claude',/claude|클로드/i]].find(([,r])=>r.test(text))?.[0];
   const pool=visible.filter(i=>!provider||i.provider===provider);
   const selected=pool.find(i=>i.id===focus);
-  if(locked&&selected&&action)return {action,candidates:[selected]};
   const query=words(text);
   const generic=new Set('then test regression first again next 하나 다시 테스트 회귀 먼저'.split(' '));
   if(selected&&/^(?:then\b|그럼|그러면)/i.test(text.trim())&&query.every(q=>generic.has(q)))return {action,candidates:[selected]};
@@ -24,15 +26,23 @@ export function route(text,items,focus,mode='auto',locked=false){
     if(freq)weights.set(q,1+Math.log((docs.length+1)/(freq+1)));
   }
   const scores=docs.map(d=>{
-    let score=0;
+    let score=0,hits=0,titled=false;
     for(const [q,weight] of weights){
-      score+=weight*(d.title.has(q)?3:d.body.has(q)?1.5:d.group.has(q)?0.65:0);
+      const place=d.title.has(q)?3:d.body.has(q)?1.5:d.group.has(q)?0.65:0;
+      score+=weight*place;
+      if(place){hits++;titled=titled||place===3;}
     }
-    return {i:d.i,score};
+    return {i:d.i,score,strong:titled||hits>1};
   }).sort((a,b)=>b.score-a.score);
   const best=scores[0]?.score||0;
-  if(best>=2 && (scores.length===1||best-scores[1].score>=Math.max(1,best*.22)))return {action,candidates:[scores[0].i]};
-  if(best)return {action,candidates:scores.filter(x=>x.score>=best*.65).slice(0,8).map(x=>x.i)};
+  // One incidental word in a reply or project name finds a thread, but is not enough to send to it unasked.
+  const only=(i,strong)=>action&&!strong?{action,candidates:[i],confirm:true}:{action,candidates:[i]};
+  if(best>=2 && (scores.length===1||best-scores[1].score>=Math.max(1,best*.22)))return only(scores[0].i,scores[0].strong);
+  if(best){
+    const close=scores.filter(x=>x.score>=best*.65).slice(0,8).map(x=>x.i);
+    return close.length===1?only(close[0],false):{action,candidates:close};
+  }
   if(selected&&/\b(then|go ahead|continue|proceed|do it|run the tests|that thread|yes|ok)\b|그럼|그래|진행해|이어서|계속|테스트부터/i.test(text))return {action,candidates:[selected]};
-  return {action,candidates:pool.slice(0,8)};
+  const rest=pool.slice(0,8);
+  return rest.length===1?only(rest[0],false):{action,candidates:rest};
 }

@@ -34,15 +34,35 @@ final class MenuApp: NSObject, NSApplicationDelegate {
         environment["ATLAS_RUNTIME"] = data.appendingPathComponent("runtime", isDirectory: true).path
         proc.environment = environment
         proc.currentDirectoryURL = resources
+        proc.terminationHandler = { [weak self] ended in
+            DispatchQueue.main.async { self?.serviceEnded(ended) }
+        }
         do {
             try proc.run()
             service = proc
+            item.button?.title = "Thread Atlas"
         } catch {
             let alert = NSAlert()
             alert.messageText = "Thread Atlas could not start"
             alert.informativeText = error.localizedDescription
             alert.runModal()
         }
+    }
+
+    private var quitting = false
+    private func serviceEnded(_ ended: Process) {
+        guard !quitting, service === ended else { return }
+        service = nil
+        // Status 0 means another instance already serves this data directory; its launch URL stays usable.
+        if ended.terminationStatus == 0 { return }
+        item.button?.title = "Thread Atlas ⚠︎"
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Thread Atlas stopped"
+        alert.informativeText = "The local service exited with status \(ended.terminationStatus). Check that port 43821 is free and that uv or python3 can install its dependency, then restart it."
+        alert.addButton(withTitle: "Restart")
+        alert.addButton(withTitle: "Dismiss")
+        if alert.runModal() == .alertFirstButtonReturn { waitingToOpen = true; startService() }
     }
 
     private var checking = false
@@ -69,6 +89,7 @@ final class MenuApp: NSObject, NSApplicationDelegate {
     @objc func openWorkspace() { waitingToOpen = true; openWhenReady() }
     @objc func openExtension() { NSWorkspace.shared.open(resources.appendingPathComponent("extension")) }
     @objc func quit() {
+        quitting = true
         timer?.invalidate()
         if service?.isRunning == true { service?.terminate() }
         NSApplication.shared.terminate(nil)

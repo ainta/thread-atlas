@@ -1,5 +1,7 @@
+import difflib
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -8,6 +10,21 @@ from contextlib import contextmanager
 
 def ident(*parts):
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()[:32]
+
+
+def fingerprint(text):
+    """Reduce a message to what survives rendering, so Markdown source and page text compare equal."""
+    text=re.sub(r'\[([^\]]*)\]\([^)]*\)',r'\1',text[:20000])
+    text=re.sub(r'(?m)^\s*(?:[-*+]|\d+[.)])\s+','',text)
+    return ''.join(ch for ch in text.casefold() if ch.isalnum())
+
+
+def similar(a,b,threshold=.9):
+    """True when two fingerprints differ only by the small additions a rendered page makes."""
+    a,b=a[:6000],b[:6000]
+    if min(len(a),len(b))<threshold*max(len(a),len(b)):return False
+    matcher=difflib.SequenceMatcher(None,a,b,autojunk=False)
+    return matcher.real_quick_ratio()>=threshold and matcher.quick_ratio()>=threshold and matcher.ratio()>=threshold
 
 
 SCHEMA = """
@@ -24,6 +41,7 @@ CREATE TABLE IF NOT EXISTS aliases(session TEXT,alias TEXT,seq INTEGER REFERENCE
 CREATE INDEX IF NOT EXISTS message_thread ON messages(session,at);
 CREATE INDEX IF NOT EXISTS alias_target ON aliases(session,seq);
 CREATE INDEX IF NOT EXISTS alerts ON messages(alert,seq);
+CREATE INDEX IF NOT EXISTS inbox ON messages(role,at);
 CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY,inode INTEGER,offset INTEGER,meta TEXT);
 CREATE TABLE IF NOT EXISTS deliveries(
  id TEXT PRIMARY KEY,session TEXT REFERENCES sessions(id),body TEXT,status TEXT,
@@ -85,42 +103,100 @@ class Store:
         if not row: raise ValueError("Unknown session")
         return dict(row)
 
-    def message(self,sid,source,role,body,at,notify=True):
-        if role not in ('assistant','user') or not isinstance(body,str) or not body.strip():return
+    def message(self,sid,source,role,body,at,notify=True,track_latest=True):
+        """Store one message. Returns True when it was new.
+
+        `track_latest` orders the session's latest reply by timestamp. Batches whose timestamps are missing or come
+        from an older snapshot pass False and settle the latest reply by conversation order in `finish_batch`.
+        """
+        if role not in ('assistant','user') or not isinstance(body,str) or not body.strip():return False
         body=body.strip()[:200000]
         at=float(at or 0)
         alert=int(role=="assistant" and notify and at>=self.baseline)
         row=self.db.execute("""INSERT OR IGNORE INTO messages(session,source_id,role,body,at,alert)
             SELECT id,?,?,?,?,CASE WHEN hidden THEN 0 ELSE ? END FROM sessions WHERE id=?""",
             (source,role,body,at,alert,sid))
-        if not row.rowcount:return
+        if not row.rowcount:return False
         if role=="user":
             self.db.execute("UPDATE sessions SET title=? WHERE id=? AND title=''",(" ".join(body.split())[:95],sid))
-        else:
+        elif track_latest:
             self.db.execute("UPDATE sessions SET latest=?, latest_at=? WHERE id=? AND latest_at<=?",
                             (body[:2200],at,sid,at))
+        return True
 
-    def merge_message(self,sid,key,role,body,at,initial,matched,notify):
-        """Align matching export/DOM observations without collapsing repeated utterances."""
+    def merge_message(self,sid,key,role,body,at,initial,seen,notify,estimated=False):
+        """Align matching export/DOM observations without collapsing repeated utterances.
+
+        `seen` is one dict per session and batch. It carries which stored messages are taken and where the last match was.
+        """
         if role not in ('assistant','user') or not isinstance(body,str) or not body.strip():return
         body=body.strip()[:200000]
+        matched=seen.setdefault('matched',set())
         alias=self.db.execute("SELECT a.seq,m.body,m.role,m.at FROM aliases a JOIN messages m ON m.seq=a.seq WHERE a.session=? AND a.alias=?",(sid,key)).fetchone()
         if alias:
             if not initial and alias['role']==role and alias['body']!=body:
                 self.db.execute("UPDATE messages SET body=? WHERE seq=?",(body,alias['seq']))
                 if role=='assistant':
                     self.db.execute("UPDATE sessions SET latest=? WHERE id=? AND latest_at=?",(body[:2200],sid,alias['at']))
-            matched.add(alias[0]);return
-        row=self.db.execute("SELECT seq FROM messages WHERE session=? AND source_id=?",(sid,key)).fetchone()
-        if not row and initial:
-            rows=self.db.execute("SELECT seq FROM messages WHERE session=? AND role=? AND body=? ORDER BY at,seq",(sid,role,body))
-            row=next((r for r in rows if r[0] not in matched),None)
-        if not row:
-            self.message(sid,key,role,body,at,notify)
+            found,added=alias[0],False
+        else:
             row=self.db.execute("SELECT seq FROM messages WHERE session=? AND source_id=?",(sid,key)).fetchone()
+            found=row[0] if row else self.align(sid,role,body,seen) if initial else None
+            added=False
+            if found is None:
+                added=self.message(sid,key,role,body,at,notify,track_latest=not initial)
+                row=self.db.execute("SELECT seq FROM messages WHERE session=? AND source_id=?",(sid,key)).fetchone()
+                found=row[0] if row else None
+            if found is not None:
+                self.db.execute("INSERT OR IGNORE INTO aliases VALUES(?,?,?)",(sid,key,found))
+        if found is None:return
+        matched.add(found);seen['last']=found
+        if initial and at and not estimated:
+            # A page read on connect stores history without times. A later export fills them in where it agrees.
+            self.db.execute("UPDATE messages SET at=? WHERE seq=? AND at=0",(float(at),found))
+        if role=='assistant':seen['tail']=(found,added)
+
+    def finish_batch(self,sid,seen):
+        """Settle the latest reply after a page read or an export, by conversation order rather than timestamps.
+
+        The batch's final reply becomes the latest only when the batch is the first view of the session or that reply
+        was new. A snapshot whose final reply is already known adds nothing after it, so it cannot replace a newer one.
+        """
+        tail=seen.get('tail')
+        if not tail:return
+        seq,added=tail
+        row=self.db.execute("SELECT body,at FROM messages WHERE seq=?",(seq,)).fetchone()
         if row:
-            matched.add(row[0])
-            self.db.execute("INSERT OR IGNORE INTO aliases VALUES(?,?,?)",(sid,key,row[0]))
+            self.db.execute("UPDATE sessions SET latest=?,latest_at=? WHERE id=? AND (?=1 OR latest='')",
+                            (row['body'][:2200],row['at'],sid,int(added)))
+            # Times an export filled in for the current latest reply also apply to the session.
+            self.db.execute("UPDATE sessions SET latest_at=? WHERE id=? AND latest_at=0 AND latest=?",(row['at'],sid,row['body'][:2200]))
+
+    def align(self,sid,role,body,seen):
+        """Find the stored message that an export or a freshly read page is showing again under another ID."""
+        pool=seen.get('pool')
+        if pool is None:
+            pool=seen['pool']=[dict(r) for r in self.db.execute("SELECT seq,role,body FROM messages WHERE session=? ORDER BY at,seq",(sid,))]
+        matched=seen['matched']
+        free=[r for r in pool if r['role']==role and r['seq'] not in matched]
+        exact=next((r for r in free if r['body']==body),None)
+        if exact:return exact['seq']
+        mark=fingerprint(body)
+        if not mark:return None
+        def marked(r):
+            if 'mark' not in r:r['mark']=fingerprint(r['body'])
+            return r['mark']
+        same=next((r for r in free if marked(r)==mark),None)
+        if same:return same['seq']
+        # Pages add or drop a little text around code, citations and math. Accept the message stored right after the
+        # previous match only when nearly all of the text agrees. A regenerated answer often opens with the same
+        # sentence, so a shared beginning or ending alone is not enough and would hide the newer answer.
+        spot=next((n for n,r in enumerate(pool) if r['seq']==seen.get('last')),None)
+        after=pool[spot+1] if spot is not None and spot+1<len(pool) else None
+        if after and after['role']==role and after['seq'] not in matched:
+            other=marked(after)
+            if min(len(mark),len(other))>=24 and similar(mark,other):return after['seq']
+        return None
 
     def edit(self,key,change):
         with self.tx():

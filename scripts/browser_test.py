@@ -109,6 +109,14 @@ def main():
             page.locator('#prompt').fill('');page.locator('#mode').select_option('auto')
             page.locator('#prompt').fill('Where did we leave authentication review?');page.locator('#prompt').press('Enter')
             expect(page.locator('#chat .answer').last).to_contain_text('ALPHA')
+            # A native notification identifies the exact reply, even if a newer answer arrived before the click.
+            notification=next(m for m in info['inbox'] if 'ALPHA reply' in m['body'])
+            opened=ctx.new_page()
+            opened.goto((d/'data/launch.url').read_text().strip()+'#reply-'+str(notification['seq']))
+            expect(opened.locator('h1')).to_have_text('Inbox')
+            expect(opened.locator('#dialogContent')).to_contain_text(notification['body'])
+            expect(opened.locator('#dialogTitle')).to_have_text('Authentication review')
+            opened.locator('#closeDialog').click();opened.close()
             if os.environ.get('ATLAS_SCREENSHOT'):page.screenshot(path=os.environ['ATLAS_SCREENSHOT'])
             for width in (390,820,1024,1440):
                 page.set_viewport_size({'width':width,'height':900})
@@ -120,6 +128,14 @@ def main():
             expect(page.locator('.card')).to_have_count(103,timeout=10000)
             page.locator('#viewAction').click();expect(page.locator('.card')).to_have_count(0)
             page.locator('#viewAction').click();expect(page.locator('.card')).to_have_count(103)
+            # Notifications keep working after their replies fall out of the 150-entry inbox window.
+            extra=[{'uuid':'old-window-'+str(n),'chat_messages':[{'uuid':'m','sender':'assistant','text':'Later','created_at':'2090-01-01T00:00:00Z'}]} for n in range(160)]
+            assert page.request.post(origin+'/api/import',data={'provider':'Claude','account':'Window','data':extra}).ok
+            assert notification['seq'] not in [m['seq'] for m in page.request.get(origin+'/api/state').json()['inbox']]
+            old_url=(d/'data/launch.url').read_text().strip()+'#reply-'+str(notification['seq'])
+            page.goto(old_url);expect(page.locator('#dialogContent')).to_contain_text(notification['body'])
+            assert page.request.post(origin+'/api/edit',data={'id':notification['session'],'hidden':True}).ok
+            page.reload();expect(page.locator('h1')).to_have_text('Inbox');expect(page.locator('#dialog')).not_to_be_visible()
             assert not errors,errors
             ctx.close();print('PASS: both extension DOM round trips, badge receipts, read-only ZIP import, lookup, routing, drag, hide/restore, reload, language switch, authorization, 4 widths, and a 103-session map.')
         finally:proc.terminate();proc.wait(timeout=20)
