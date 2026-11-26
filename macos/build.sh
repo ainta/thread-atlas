@@ -22,5 +22,6 @@ cat > "$contents/Info.plist" <<'PLIST'
 <key>LSUIElement</key><true/>
 </dict></plist>
 PLIST
+"$root/macos/build-alerts.sh" "$contents/Helpers/Thread Atlas Alerts.app"
 codesign --force --sign - "$bundle"
 printf '%s\n' "$bundle"
