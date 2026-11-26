@@ -25,7 +25,7 @@ On Linux, run `uv sync --frozen` followed by `uv run python -m atlas`. Use `--no
 
 | Source | Discover and read | Send to the original |
 | --- | --- | --- |
-| Codex | Incrementally indexes user-facing messages from local session transcripts. | Uses the signed-in local App Server daemon over its Unix socket. A busy thread must finish its current turn. |
+| Codex | Watches local transcripts. **Connections → Import Codex history** adds interactive threads from the local App Server. | Uses the signed-in local App Server daemon over its Unix socket. A busy thread must finish its current turn. |
 | Claude Code | Indexes local project transcripts and watches for new replies. | Resumes the exact session ID in its original working directory. A session owned by another terminal is protected from concurrent writes. |
 | ChatGPT web | Import conversations JSON or ZIP exports. The Chrome extension tracks selected open conversations. | Available in a connected tab when **Allow replies to this thread** is enabled and the page exposes a usable composer. |
 | Claude web | Import Claude chat exports or track open conversations through the extension. | Uses the same opt-in tab mechanism, with a source-specific message reader. |
@@ -38,6 +38,12 @@ For Codex, keep the local App Server daemon running. On versions with daemon man
 
 ## Use the workspace
 
+- Create a top-level project with **New project**. The **Work map** shows projects as expandable folders with sessions and subprojects underneath. Use a project's **⋯** menu to add a subproject or move the entire branch.
+- Newly discovered or imported sessions go into **Unclassified**. Move them to any project from the Work map or session details.
+- Drag a project name in the sidebar or work map onto another project to move its whole branch. Drop it on **Work map** in the sidebar to return it to the top level.
+- Use **Move up** or **Move down** in a project's **⋯** menu to reorder folders at the same level. Thread Atlas saves the order for the sidebar and Work map.
+- Open a session to set its **Workspace status**. **Default** and **Active** appear in the Work map, and the **Active** view focuses on sessions you marked. **Hidden** stays in its project and appears with **Show hidden**. **Will not consider** removes it from the tree, inbox, and routing. Restore puts it back in its previous project.
+- Set a **Folder status** from its **⋯** menu. Active folders and their visible contents appear in **Active**. Hidden folders are revealed in place with **Show hidden**. Branches marked **Will not consider** can be restored with each session's own status.
 - Drag a card into a project, onto **Hidden**, or onto the composer to pin a reply target. Use card details for equivalent move and hide controls.
 - Ask **“Where did we leave the payment retry policy?”** to retrieve a source message. Type **“Then run the tests”** to continue it. The destination appears before you send. Ambiguous requests offer candidates. **Find** and **Send to thread** let you explicitly select an intent.
 - **Inbox** shows latest replies. **Reply here** pins the thread, while simply opening a source shows its history. New replies do not redirect a draft.

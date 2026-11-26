@@ -5,7 +5,8 @@ import re
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+import uuid
+from contextlib import contextmanager, nullcontext
 
 
 def ident(*parts):
@@ -27,11 +28,46 @@ def similar(a,b,threshold=.9):
     return matcher.real_quick_ratio()>=threshold and matcher.quick_ratio()>=threshold and matcher.ratio()>=threshold
 
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE);
+WORKSPACE_STATUSES = ("default", "active", "hidden", "excluded")
+SUPPRESSED_STATUSES = ("hidden", "excluded")
+DEFAULT_PROJECT = "Unclassified"
+STATUS_COLUMN = (
+    "workspace_status TEXT NOT NULL DEFAULT 'default' "
+    "CHECK(workspace_status IN ('default','active','hidden','excluded'))"
+)
+PROJECT_COLUMNS = f"""
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT REFERENCES groups(id),
+ position INTEGER NOT NULL DEFAULT 0, {STATUS_COLUMN}
+"""
+
+
+def inherited_status(own, parent):
+    return f"""CASE
+      WHEN 'excluded' IN ({own}, {parent}) THEN 'excluded'
+      WHEN 'hidden' IN ({own}, {parent}) THEN 'hidden'
+      WHEN 'active' IN ({own}, {parent}) THEN 'active'
+      ELSE 'default' END"""
+
+
+STATUS_VIEWS = f"""
+CREATE VIEW IF NOT EXISTS project_statuses AS
+ WITH RECURSIVE tree(id, effective_status) AS (
+   SELECT id, workspace_status FROM groups WHERE parent_id IS NULL
+   UNION ALL
+   SELECT g.id, {inherited_status("g.workspace_status", "parent.effective_status")}
+   FROM groups g JOIN tree parent ON parent.id=g.parent_id
+ ) SELECT id, effective_status FROM tree;
+CREATE VIEW IF NOT EXISTS session_statuses AS
+ SELECT s.id, {inherited_status("s.workspace_status", "g.effective_status")} AS effective_status
+ FROM sessions s LEFT JOIN project_statuses g ON g.id=s.group_id;
+"""
+
+SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS groups({PROJECT_COLUMNS});
 CREATE TABLE IF NOT EXISTS sessions(
  id TEXT PRIMARY KEY,provider TEXT,account TEXT,source TEXT,cwd TEXT,url TEXT,title TEXT,
- group_id TEXT REFERENCES groups(id),position REAL DEFAULT 0,hidden INTEGER DEFAULT 0,
+ group_id TEXT REFERENCES groups(id),position REAL DEFAULT 0,{STATUS_COLUMN},
+ excluded_from TEXT REFERENCES groups(id),
  state TEXT DEFAULT 'idle',latest TEXT DEFAULT '',latest_at REAL DEFAULT 0,seen INTEGER DEFAULT 0,
  live_at REAL DEFAULT 0,bridge TEXT DEFAULT '',writable INTEGER DEFAULT 0,synced_at REAL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS messages(
@@ -56,8 +92,48 @@ class Store:
         self.path = path
         self.local = threading.local()
         self.db.executescript(SCHEMA)
+        if not self._has_project_parents():
+            self._migrate_projects()
+        self._migrate_workspace_columns()
+        self.db.executescript(STATUS_VIEWS)
+        self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS root_project_name ON groups(name) WHERE parent_id IS NULL")
+        self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS child_project_name ON groups(parent_id, name) WHERE parent_id IS NOT NULL")
         self.db.execute("INSERT OR IGNORE INTO prefs VALUES('baseline',?)",(str(time.time()),))
         self.baseline = float(self.pref("baseline"))
+
+    def _has_project_parents(self):
+        return any(column["name"] == "parent_id" for column in self.db.execute("PRAGMA table_info(groups)"))
+
+    def _migrate_projects(self):
+        # Rebuild the flat table to replace its global name constraint. Keep the IDs that sessions reference.
+        self.db.execute("PRAGMA foreign_keys=OFF")
+        try:
+            with self.tx():
+                if self._has_project_parents():
+                    return
+                self.db.execute(f"CREATE TABLE nested_groups({PROJECT_COLUMNS})")
+                self.db.execute("INSERT INTO nested_groups(id, name) SELECT id, name FROM groups")
+                self.db.execute("DROP TABLE groups")
+                self.db.execute("ALTER TABLE nested_groups RENAME TO groups")
+                if self.db.execute("PRAGMA foreign_key_check").fetchone():
+                    raise sqlite3.IntegrityError("Project migration would leave invalid references")
+        finally:
+            self.db.execute("PRAGMA foreign_keys=ON")
+
+    def _migrate_workspace_columns(self):
+        with self.tx():
+            project_columns = {column["name"] for column in self.db.execute("PRAGMA table_info(groups)")}
+            if "workspace_status" not in project_columns:
+                self.db.execute(f"ALTER TABLE groups ADD COLUMN {STATUS_COLUMN}")
+            if "position" not in project_columns:
+                self.db.execute("ALTER TABLE groups ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+            columns = {column["name"] for column in self.db.execute("PRAGMA table_info(sessions)")}
+            if "workspace_status" in columns:
+                return
+            self.db.execute(f"ALTER TABLE sessions ADD COLUMN {STATUS_COLUMN}")
+            self.db.execute("ALTER TABLE sessions ADD COLUMN excluded_from TEXT REFERENCES groups(id)")
+            if "hidden" in columns:
+                self.db.execute("UPDATE sessions SET workspace_status='hidden' WHERE hidden!=0")
 
     @property
     def db(self):
@@ -83,25 +159,123 @@ class Store:
         row=self.db.execute("SELECT value FROM prefs WHERE key=?",(key,)).fetchone()
         return row[0] if row else default
 
-    def group(self,name):
-        name=str(name or "Unsorted").strip()[:160] or "Unsorted"
-        key=ident("project",name)
-        self.db.execute("INSERT OR IGNORE INTO groups VALUES(?,?)",(key,name))
-        return key
+    def _project(self, key):
+        if not isinstance(key, str):
+            raise ValueError("Unknown project")
+        row = self.db.execute("SELECT id, name, parent_id, workspace_status FROM groups WHERE id=?", (key,)).fetchone()
+        if row is None:
+            raise ValueError("Unknown project")
+        return row
 
-    def session(self,provider,account,source,group,title="",cwd="",url=""):
+    def group(self, name=DEFAULT_PROJECT, parent_id=None):
+        name=str(name or DEFAULT_PROJECT).strip()[:160] or DEFAULT_PROJECT
+        with nullcontext() if self.db.in_transaction else self.tx():
+            if parent_id is not None:
+                self._project(parent_id)
+            self.db.execute(
+                "INSERT INTO groups(id, name, parent_id, position) VALUES(?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (uuid.uuid4().hex, name, parent_id, self._new_project_position(parent_id)),
+            )
+            row = self.db.execute("SELECT id FROM groups WHERE parent_id IS ? AND name=?", (parent_id, name)).fetchone()
+            return row["id"]
+
+    def move_group(self, key, parent_id):
+        with self.tx():
+            project = self._project(key)
+            if project["parent_id"] == parent_id:
+                return
+            if parent_id is not None:
+                self._project(parent_id)
+                cycle = self.db.execute("""WITH RECURSIVE ancestors(id) AS (
+                    SELECT ? UNION
+                    SELECT g.parent_id FROM groups g JOIN ancestors a ON g.id=a.id WHERE g.parent_id IS NOT NULL
+                  ) SELECT 1 FROM ancestors WHERE id=?""", (parent_id, key)).fetchone()
+                if cycle:
+                    raise ValueError("A project cannot move into itself or one of its subprojects")
+            duplicate = self.db.execute(
+                "SELECT id, workspace_status FROM groups WHERE parent_id IS ? AND name=? AND id!=?",
+                (parent_id, project["name"], key),
+            ).fetchone()
+            if duplicate:
+                self._clear_empty_project_collision(duplicate, parent_id, project["name"])
+            self.db.execute("UPDATE groups SET parent_id=?, position=? WHERE id=?",
+                            (parent_id, self._new_project_position(parent_id), key))
+            self._cancel_unavailable_deliveries()
+
+    def _new_project_position(self, parent_id):
+        last = self.db.execute(
+            "SELECT coalesce(max(position),0) FROM groups WHERE parent_id IS ?", (parent_id,)
+        ).fetchone()[0]
+        return last + 1 if last else 0
+
+    def reorder_group(self, key, sibling_id, side):
+        if side not in ("before", "after"):
+            raise ValueError("Choose a position before or after another folder")
+        with self.tx():
+            project = self._project(key)
+            sibling = self._project(sibling_id)
+            if key == sibling_id or project["parent_id"] != sibling["parent_id"]:
+                raise ValueError("Choose a different folder at the same level")
+            ids = [row["id"] for row in self.db.execute(
+                "SELECT id FROM groups WHERE parent_id IS ? ORDER BY position,name,id", (project["parent_id"],)
+            )]
+            ids.remove(key)
+            ids.insert(ids.index(sibling_id) + (side == "after"), key)
+            self.db.executemany("UPDATE groups SET position=? WHERE id=?", enumerate(ids, 1))
+
+    def _clear_empty_project_collision(self, existing, parent_id, name):
+        key = existing["id"]
+        occupied = self.db.execute("""SELECT 1 FROM groups WHERE parent_id=?
+            UNION ALL SELECT 1 FROM sessions WHERE group_id=? OR excluded_from=? LIMIT 1""",
+            (key, key, key)).fetchone()
+        if existing["workspace_status"] != "excluded" or occupied:
+            raise ValueError("A project with that name already exists at the destination")
+        # Preserve the empty excluded folder so the move never deletes a restorable project.
+        index = 1
+        while True:
+            suffix = " (empty)" if index == 1 else f" (empty {index})"
+            replacement = name[:160-len(suffix)] + suffix
+            if not self.db.execute(
+                "SELECT 1 FROM groups WHERE parent_id IS ? AND name=?", (parent_id, replacement)
+            ).fetchone():
+                self.db.execute("UPDATE groups SET name=? WHERE id=?", (replacement, key))
+                return
+            index += 1
+
+    def set_project_status(self, key, status):
+        if status not in WORKSPACE_STATUSES:
+            raise ValueError("Unknown workspace status")
+        with self.tx():
+            project = self._project(key)
+            if project["workspace_status"] != status:
+                self.db.execute("UPDATE groups SET workspace_status=? WHERE id=?", (status, key))
+                self._cancel_unavailable_deliveries()
+
+    def session(self,provider,account,source,group=DEFAULT_PROJECT,title="",cwd="",url=""):
         key=ident(provider,account,source)
+        existing = self.db.execute("SELECT id,group_id FROM sessions WHERE id=?", (key,)).fetchone()
+        if existing is None and provider == "Codex":
+            # App Server can discover a thread before a transcript with its account metadata arrives.
+            existing = self.db.execute(
+                "SELECT id,group_id FROM sessions WHERE provider='Codex' AND source=? LIMIT 1", (source,)
+            ).fetchone()
+        if existing is not None:
+            key = existing["id"]
+        group_id = existing["group_id"] if existing is not None else self.group(group)
         self.db.execute("""INSERT INTO sessions(id,provider,account,source,cwd,url,title,group_id,synced_at)
           VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET synced_at=excluded.synced_at,
           title=CASE WHEN excluded.title!='' THEN excluded.title ELSE sessions.title END,
           url=CASE WHEN excluded.url!='' THEN excluded.url ELSE sessions.url END""",
-          (key,provider,account,source,cwd,url,title[:240],self.group(group),time.time()))
+          (key,provider,account,source,cwd,url,title[:240],group_id,time.time()))
         return key
 
     def session_row(self,key):
-        row=self.db.execute("SELECT * FROM sessions WHERE id=?",(key,)).fetchone()
+        row=self.db.execute("""SELECT s.*,v.effective_status FROM sessions s JOIN session_statuses v ON v.id=s.id
+                              WHERE s.id=?""",(key,)).fetchone()
         if not row: raise ValueError("Unknown session")
-        return dict(row)
+        session = dict(row)
+        session["hidden"] = session["effective_status"] in SUPPRESSED_STATUSES
+        return session
 
     def message(self,sid,source,role,body,at,notify=True,track_latest=True):
         """Store one message. Returns True when it was new.
@@ -114,7 +288,8 @@ class Store:
         at=float(at or 0)
         alert=int(role=="assistant" and notify and at>=self.baseline)
         row=self.db.execute("""INSERT OR IGNORE INTO messages(session,source_id,role,body,at,alert)
-            SELECT id,?,?,?,?,CASE WHEN hidden THEN 0 ELSE ? END FROM sessions WHERE id=?""",
+            SELECT id,?,?,?,?,CASE WHEN effective_status IN ('default','active') THEN ? ELSE 0 END
+            FROM session_statuses WHERE id=?""",
             (source,role,body,at,alert,sid))
         if not row.rowcount:return False
         if role=="user":
@@ -198,23 +373,54 @@ class Store:
             if min(len(mark),len(other))>=24 and similar(mark,other):return after['seq']
         return None
 
+    def _set_workspace_status(self, session, status):
+        key = session["id"]
+        if status == "excluded":
+            self.db.execute(
+                "UPDATE sessions SET workspace_status=?, excluded_from=group_id, group_id=NULL WHERE id=?",
+                (status, key),
+            )
+        elif session["workspace_status"] == "excluded":
+            group = session["excluded_from"] or self.group()
+            self.db.execute(
+                "UPDATE sessions SET workspace_status=?, group_id=?, excluded_from=NULL WHERE id=?",
+                (status, group, key),
+            )
+        else:
+            self.db.execute("UPDATE sessions SET workspace_status=? WHERE id=?", (status, key))
+
+    def _cancel_unavailable_deliveries(self):
+        self.db.execute("""UPDATE deliveries SET status='failed', detail='Session was hidden or excluded before dispatch', updated=?
+          WHERE status='queued' AND session IN (
+            SELECT id FROM session_statuses WHERE effective_status IN ('hidden','excluded')
+          )""",(time.time(),))
+
     def edit(self,key,change):
         with self.tx():
-            self.session_row(key)
-            if "hidden" in change:
-                self.db.execute("UPDATE sessions SET hidden=? WHERE id=?",(int(bool(change["hidden"])),key))
+            session = self.session_row(key)
+            status = change.get("workspace_status", session["workspace_status"])
+            own_hidden = session["workspace_status"] in SUPPRESSED_STATUSES
+            if "workspace_status" not in change and "hidden" in change and bool(change["hidden"]) != own_hidden:
+                status = "hidden" if change["hidden"] else "default"
+            if status not in WORKSPACE_STATUSES:
+                raise ValueError("Unknown workspace status")
+            if status != session["workspace_status"]:
+                self._set_workspace_status(session, status)
             if change.get("read"):
                 self.db.execute("UPDATE sessions SET seen=COALESCE((SELECT max(seq) FROM messages WHERE session=?),0) WHERE id=?",(key,key))
             if "title" in change:
                 name=str(change["title"]).strip()[:240]
                 if name:self.db.execute("UPDATE sessions SET title=? WHERE id=?",(name,key))
             if "group" in change:
-                group=change["group"]
-                if not self.db.execute("SELECT id FROM groups WHERE id=?",(group,)).fetchone():raise ValueError("Unknown project")
+                if status == "excluded":
+                    raise ValueError("Restore the session before moving it to a project")
+                group=self._project(change["group"])["id"]
                 ids=[r[0] for r in self.db.execute("SELECT id FROM sessions WHERE group_id=? AND id!=? ORDER BY position,title,id",(group,key))]
                 before=change.get("before")
                 ids.insert(ids.index(before) if before in ids else len(ids),key)
                 self.db.executemany("UPDATE sessions SET group_id=?,position=? WHERE id=?",[(group,n,i) for n,i in enumerate(ids)])
+            if status != session["workspace_status"] or "group" in change:
+                self._cancel_unavailable_deliveries()
 
     def history(self,key):
         self.session_row(key)
@@ -227,20 +433,25 @@ class Store:
         last=self.db.execute("SELECT COALESCE(max(seq),0) FROM messages").fetchone()[0]
         if after is None:return [],last
         rows=[dict(r) for r in self.db.execute("""SELECT m.seq,m.session,m.at,substr(m.body,1,2400) body
-          FROM messages m JOIN sessions s ON s.id=m.session WHERE m.seq>? AND m.seq<=? AND m.alert=1 AND s.hidden=0
+          FROM messages m JOIN session_statuses v ON v.id=m.session WHERE m.seq>? AND m.seq<=? AND m.alert=1
+          AND v.effective_status IN ('default','active')
           ORDER BY m.seq LIMIT ?""",(after,last,limit))]
         return rows,(rows[-1]['seq'] if len(rows)==limit else last)
 
     def state(self):
         now=time.time()
-        items=[dict(r) for r in self.db.execute("""SELECT s.id,s.provider,s.account,s.title,s.group_id,s.hidden,s.state,
-         s.latest,s.latest_at,s.url,s.live_at,s.synced_at,s.bridge,s.writable,
-         EXISTS(SELECT 1 FROM messages m WHERE m.session=s.id AND m.seq>s.seen AND m.alert=1) unread
-         FROM sessions s ORDER BY s.group_id,s.position,s.title,s.id""")]
+        items=[dict(r) for r in self.db.execute("""SELECT s.id,s.provider,s.account,s.title,s.group_id,s.workspace_status,s.state,
+         s.latest,s.latest_at,s.url,s.live_at,s.synced_at,s.bridge,s.writable,v.effective_status,
+         v.effective_status IN ('default','active') AND
+           EXISTS(SELECT 1 FROM messages m WHERE m.session=s.id AND m.seq>s.seen AND m.alert=1) unread
+         FROM sessions s JOIN session_statuses v ON v.id=s.id ORDER BY s.group_id,s.position,s.title,s.id""")]
         for i in items:
+            i['hidden']=i['effective_status'] in SUPPRESSED_STATUSES
             i['web_live']=bool(i.pop('bridge') and i['live_at']>=now-35)
-        return {"sessions":items,"groups":[dict(r) for r in self.db.execute("SELECT * FROM groups ORDER BY name")],
+        return {"sessions":items,"groups":[dict(r) for r in self.db.execute("""SELECT g.*,v.effective_status FROM groups g
+                JOIN project_statuses v ON v.id=g.id ORDER BY g.position,g.name,g.id""")],
                 "inbox":[dict(r) for r in self.db.execute("""SELECT m.seq,m.session,substr(m.body,1,600) body,m.at,m.seq>s.seen AND m.alert unread
-                FROM messages m JOIN sessions s ON s.id=m.session WHERE s.hidden=0 AND m.role='assistant'
+                FROM messages m JOIN sessions s ON s.id=m.session JOIN session_statuses v ON v.id=s.id
+                WHERE v.effective_status IN ('default','active') AND m.role='assistant'
                 ORDER BY m.at DESC,m.seq DESC LIMIT 150""")],
                 "deliveries":[dict(r) for r in self.db.execute("SELECT id,session,status,detail,created,updated FROM deliveries ORDER BY created DESC LIMIT 100")]}

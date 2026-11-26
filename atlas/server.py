@@ -13,9 +13,10 @@ import uuid
 import webbrowser
 from pathlib import Path
 
-from aiohttp import web
+from aiohttp import ClientError, web
 
 from .codex import Codex, output
+from .codex_history import import_codex_history
 from .indexer import epoch, import_export, scan
 from .store import Store, ident
 
@@ -41,6 +42,7 @@ class Service:
         self.store.db.execute("INSERT OR IGNORE INTO prefs VALUES('bridge',?)",(self.bridge,))
         self.data=data;self.tasks=set();self.workers={};self.notifications=notifications
         self.scan_status='Indexing';self.codex_ok=False;self.claude_ok=False;self.last_scan=0;self.owned_terminals=set()
+        self.codex_importing=False
         self.dispatch_note=''
         self.notification_seq=self.store.db.execute("SELECT COALESCE(max(seq),0) FROM messages").fetchone()[0]
 
@@ -52,10 +54,10 @@ class Service:
             try:
                 await asyncio.to_thread(scan,self.store,self.codex_dir,self.claude_dir)
                 self.last_scan=time.time();self.scan_status='Ready'
-                for row in self.store.db.execute("""SELECT m.seq,s.title,s.provider,s.hidden FROM messages m JOIN sessions s ON s.id=m.session
+                for row in self.store.db.execute("""SELECT m.seq,s.title,s.provider,s.id FROM messages m JOIN sessions s ON s.id=m.session
                     WHERE m.alert=1 AND m.seq>? ORDER BY m.seq""",(self.notification_seq,)).fetchall():
                     self.notification_seq=row['seq']
-                    if not row['hidden']:await self.notify(row['seq'],row['title'],row['provider'])
+                    if not self.store.session_row(row['id'])['hidden']:await self.notify(row['seq'],row['title'],row['provider'])
             except Exception as e:self.scan_status='Index unavailable: '+type(e).__name__
             await asyncio.sleep(2)
 
@@ -110,6 +112,18 @@ class Service:
             except Exception:self.claude_ok=False
             await asyncio.sleep(45)
 
+    async def import_codex(self):
+        if self.codex_importing:
+            raise ValueError("A Codex history import is already running")
+        self.codex_importing=True
+        try:
+            async with Codex() as rpc:
+                return await import_codex_history(self.store,rpc)
+        except (RuntimeError, ClientError, OSError, asyncio.TimeoutError) as exc:
+            raise ValueError("Could not import history from the Codex App Server") from exc
+        finally:
+            self.codex_importing=False
+
     def snapshot(self, after=None):
         state=self.store.state()
         locked=set()
@@ -118,7 +132,7 @@ class Service:
                     if r['source'] in self.owned_terminals}
         for i in state['sessions']:
             i['owned_terminal']=i['id'] in locked
-            i['direct']=not i['owned_terminal'] and {'Codex':self.codex_ok,'Claude Code':self.claude_ok}.get(i['provider'],bool(i['web_live'] and i['writable']))
+            i['direct']=not i['hidden'] and not i['owned_terminal'] and {'Codex':self.codex_ok,'Claude Code':self.claude_ok}.get(i['provider'],bool(i['web_live'] and i['writable']))
         state['events'],state['cursor']=self.store.alerts_after(after)
         state.update(scan=self.scan_status,lastScan=self.last_scan,codex=self.codex_ok,claude=self.claude_ok,
                      notifications=self.store.pref('notifications','1' if self.notifications else '0')=='1')
@@ -137,7 +151,7 @@ class Service:
                 if old['session']!=sid or old['body']!=body:raise ValueError('Draft ID already used')
                 return dict(old)
             s=self.store.session_row(sid)
-            if s['hidden']:raise ValueError('Session is hidden')
+            if s['hidden']:raise ValueError('Session is '+s['effective_status'])
             if s['provider'] in WEB_PROVIDERS and (not s['bridge'] or not s['writable'] or time.time()-s['live_at']>35):raise ValueError('Web thread is offline or read-only')
             if s['provider']=='Codex' and not self.codex_ok:raise ValueError('Codex App Server is offline')
             if s['provider']=='Claude Code' and not self.claude_ok:raise ValueError('Claude Code is offline')
@@ -165,7 +179,7 @@ class Service:
         db.execute("""UPDATE deliveries SET status='failed',detail=CASE WHEN created<? THEN 'Thread stayed busy' ELSE 'Tab disconnected before dispatch' END
           WHERE status='queued' AND tab!='' AND (created<? OR (created<? AND NOT EXISTS
             (SELECT 1 FROM sessions s WHERE s.id=deliveries.session AND s.bridge=deliveries.tab AND s.live_at>?)))""",(now-1800,now-1800,now-75,now-35))
-        rows=db.execute("""SELECT d.*,s.provider,s.source,s.cwd,s.hidden FROM deliveries d JOIN sessions s ON d.session=s.id
+        rows=db.execute("""SELECT d.*,s.provider,s.source,s.cwd FROM deliveries d JOIN sessions s ON d.session=s.id
          WHERE d.status='queued' AND s.provider NOT IN ('ChatGPT','Claude') ORDER BY d.created""").fetchall()
         for row in rows:
             sid=row['session']
@@ -175,13 +189,15 @@ class Service:
     async def local_send(self,d):
         key=d['id'];started=False
         try:
-            if d['hidden']:raise RuntimeError('Session is hidden')
+            session=self.store.session_row(d['session'])
+            if session['hidden']:raise RuntimeError('Session is '+session['effective_status'])
             uuid.UUID(d['source'])
             if d['provider']=='Codex':
                 async with Codex() as c:
                     current=(await c.call('thread/read',{'threadId':d['source']}))['thread']
                     if current['status']['type']=='active':raise RuntimeError('Thread is active. Wait for the current turn.')
-                    self.update(key,'sending');started=True
+                    if not self.begin_local_delivery(key):return
+                    started=True
                     turn=await c.send(d['source'],d['body'])
                     self.update(key,'delivered',turn)
                     for _ in range(7200):
@@ -197,7 +213,8 @@ class Service:
                 if any(a.get('sessionId')==d['source'] for a in agents):raise RuntimeError('Session is open in another terminal; close it before resuming')
                 cwd=d['cwd']
                 if not cwd or not Path(cwd).is_dir():raise RuntimeError('Original working directory is unavailable')
-                self.update(key,'sending');started=True
+                if not self.begin_local_delivery(key):return
+                started=True
                 raw=await output('claude','--print','--resume',d['source'],'--output-format','json','--',d['body'],cwd=cwd,timeout=3600)
                 result=json.loads(raw)
                 if result.get('session_id')!=d['source'] or result.get('is_error'):raise RuntimeError('Could not verify the original Claude session')
@@ -213,6 +230,13 @@ class Service:
                   WHERE session=? AND status='queued' AND tab=''""",(time.time(),d['session']))
         finally:self.workers.pop(d['session'],None)
 
+    def begin_local_delivery(self,key):
+        # A status change can cancel a queued delivery while an async connection is established.
+        return self.store.db.execute(
+            "UPDATE deliveries SET status='sending', detail='', updated=? WHERE id=? AND status='queued'",
+            (time.time(),key),
+        ).rowcount
+
     def web_sync(self,d):
         provider,account,source,tab=d.get('provider'),d.get('account'),d.get('source'),d.get('tab')
         if provider not in WEB_PROVIDERS or not isinstance(account,str) or not 0<len(account.strip())<=120:raise ValueError('Invalid web account')
@@ -222,7 +246,7 @@ class Service:
         if provider=='ChatGPT' and re.fullmatch(r'/g/[\w-]+/c/'+re.escape(source),path):
             url='https://chatgpt.com'+path
         with self.store.tx():
-            sid=self.store.session(provider,account,source,provider+' · '+account,str(d.get('title') or '')[:180],url=url)
+            sid=self.store.session(provider,account,source,title=str(d.get('title') or '')[:180],url=url)
             s=self.store.session_row(sid)
             if s['bridge'] and s['bridge']!=tab and time.time()-s['live_at']<35:raise ValueError('Thread already connected in another tab')
             self.store.db.execute("UPDATE sessions SET live_at=?,bridge=?,writable=?,state=? WHERE id=?",(time.time(),tab,int(bool(d.get('writable'))),'run' if d.get('busy') else 'idle',sid))
@@ -285,7 +309,8 @@ def application(s):
                 seq=req.query.get('seq','')
                 if not re.fullmatch(r'[1-9][0-9]{0,18}',seq):raise ValueError('Invalid reply number')
                 row=s.store.db.execute("""SELECT m.session,m.seq,m.body,m.at FROM messages m
-                    JOIN sessions s ON s.id=m.session WHERE m.seq=? AND m.role='assistant' AND s.hidden=0""",(seq,)).fetchone()
+                    JOIN session_statuses v ON v.id=m.session WHERE m.seq=? AND m.role='assistant'
+                    AND v.effective_status IN ('default','active')""",(seq,)).fetchone()
                 value=dict(row) if row else None
             elif action=='pairing':value={'token':s.bridge,'port':s.port}
             else:raise web.HTTPNotFound()
@@ -293,8 +318,12 @@ def application(s):
             if req.content_type!='application/json':raise web.HTTPUnsupportedMediaType()
             d=await req.json()
             if action=='edit':s.store.edit(d['id'],d);value={'ok':True}
-            elif action=='group':value={'id':s.store.group(d['name'])}
+            elif action=='group':value={'id':s.store.group(d['name'],d.get('parent'))}
+            elif action=='move-group':s.store.move_group(d['id'],d['parent']);value={'ok':True}
+            elif action=='reorder-group':s.store.reorder_group(d['id'],d['sibling'],d['side']);value={'ok':True}
+            elif action=='group-status':s.store.set_project_status(d['id'],d['workspace_status']);value={'ok':True}
             elif action=='send':value=s.enqueue(d)
+            elif action=='import-codex':value=await s.import_codex()
             elif action=='import':value={'count':await asyncio.to_thread(import_export,s.store,d['provider'],d['account'],d['data'])}
             elif action=='notifications':s.store.db.execute("INSERT OR REPLACE INTO prefs VALUES('notifications',?)",('1' if d.get('enabled') else '0',));value={'ok':True}
             else:raise web.HTTPNotFound()

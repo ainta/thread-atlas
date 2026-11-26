@@ -7,6 +7,7 @@ import time
 import unittest
 from pathlib import Path
 
+from atlas.codex_history import import_codex_history
 from atlas.indexer import import_export,scan,scan_file
 from atlas.store import Store
 from atlas.server import Service
@@ -16,6 +17,239 @@ class StoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.store=Store(self.root/'workspace.sqlite')
+
+    def test_flat_projects_migrate_with_existing_ids_and_session_links(self):
+        path = self.root / "legacy.sqlite"
+        legacy = sqlite3.connect(path)
+        try:
+            legacy.executescript("""
+                CREATE TABLE groups(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+                CREATE TABLE sessions(id TEXT PRIMARY KEY, group_id TEXT REFERENCES groups(id), hidden INTEGER DEFAULT 0);
+                INSERT INTO groups VALUES('legacy-project', 'Research');
+                INSERT INTO sessions(id, group_id) VALUES('legacy-session', 'legacy-project');
+                INSERT INTO sessions VALUES('hidden-session', 'legacy-project', 1);
+            """)
+        finally:
+            legacy.close()
+
+        migrated = Store(path)
+        self.addCleanup(migrated.db.close)
+        self.assertEqual(migrated.group("Research"), "legacy-project")
+        self.assertEqual(migrated.session_row("legacy-session")["group_id"], "legacy-project")
+        self.assertEqual(migrated.session_row("legacy-session")["workspace_status"], "default")
+        hidden = migrated.session_row("hidden-session")
+        self.assertEqual((hidden["workspace_status"], hidden["group_id"]), ("hidden", "legacy-project"))
+        parent = migrated.db.execute("SELECT parent_id FROM groups WHERE id='legacy-project'").fetchone()
+        self.assertIsNone(parent["parent_id"])
+        self.assertNotEqual(migrated.group("Research", "legacy-project"), "legacy-project")
+        self.assertEqual(migrated.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_move_project_keeps_subtree_and_sessions_and_rejects_cycles(self):
+        research = self.store.group("Research")
+        study = self.store.group("Study")
+        branch = self.store.group("AI", research)
+        self.assertEqual(self.store.group("AI", research), branch)
+        self.assertNotEqual(self.store.group("AI", study), branch)
+        deepest = branch
+        for name in ("Agents", "Evaluations", "Benchmarks", "Notes", "Drafts"):
+            deepest = self.store.group(name, deepest)
+        sid = self.store.session("Codex", "local", "example", "Research")
+        self.store.edit(sid, {"group": deepest})
+
+        with self.assertRaisesRegex(ValueError, "subprojects"):
+            self.store.move_group(research, deepest)
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self.store.move_group(branch, study)
+        with self.assertRaisesRegex(ValueError, "Unknown project"):
+            self.store.group("Orphan", "missing")
+
+        self.store.move_group(branch, None)
+        self.store.move_group(research, study)
+        self.store.move_group(branch, research)
+        self.assertEqual(self.store.session("Codex", "local", "example", "Research"), sid)
+        reopened = Store(self.store.path)
+        self.addCleanup(reopened.db.close)
+        groups = {g["id"]: g for g in reopened.state()["groups"]}
+        self.assertEqual(groups[research]["parent_id"], study)
+        self.assertEqual(groups[branch]["parent_id"], research)
+        self.assertEqual(sum(g["name"] == "Research" for g in groups.values()), 1)
+        self.assertEqual(reopened.session_row(sid)["group_id"], deepest)
+
+    def test_workspace_status_affects_placement_inbox_and_dispatch(self):
+        service = Service(self.root / "statuses", self.root, self.root, 12345)
+        self.addCleanup(service.lock.close)
+        store = service.store
+        self.addCleanup(store.db.close)
+        project = store.group("Benchmarks", store.group("Research"))
+        source = "11111111-1111-1111-1111-111111111111"
+        sid = store.session("Codex", "local", source, "Research")
+        store.edit(sid, {"group": project, "workspace_status": "active"})
+        service.codex_ok = True
+        self.assertTrue(service.snapshot()["sessions"][0]["direct"])
+        store.message(sid, "first", "assistant", "First reply", time.time())
+        self.assertTrue(store.state()["inbox"])
+        queued = {"id": "status-queued-0001", "session": sid, "body": "Continue"}
+        service.enqueue(queued)
+
+        store.edit(sid, {"workspace_status": "hidden"})
+        self.assertEqual(store.session_row(sid)["group_id"], project)
+        self.assertFalse(store.state()["inbox"])
+        self.assertFalse(store.alerts_after(0)[0])
+        self.assertFalse(service.begin_local_delivery(queued["id"]))
+        self.assertEqual(service.enqueue(queued)["status"], "failed")
+        with self.assertRaisesRegex(ValueError, "hidden"):
+            service.enqueue({**queued, "id": "status-hidden-0001"})
+
+        store.edit(sid, {"workspace_status": "excluded"})
+        store.edit(sid, {"workspace_status": "excluded"})  # Retrying exclusion keeps the restore location.
+        self.assertEqual(store.session("Codex", "local", source, "Research"), sid)
+        self.assertIsNone(store.session_row(sid)["group_id"])
+        store.message(sid, "later", "assistant", "Later reply", time.time())
+        self.assertFalse(store.state()["inbox"])
+        self.assertFalse(store.alerts_after(0)[0])
+        with self.assertRaisesRegex(ValueError, "excluded"):
+            service.enqueue({**queued, "id": "status-excluded-0001"})
+        with self.assertRaisesRegex(ValueError, "Restore"):
+            store.edit(sid, {"group": project})
+
+        store.edit(sid, {"workspace_status": "default"})
+        session = store.session_row(sid)
+        self.assertEqual(session["group_id"], project)
+        self.assertIsNone(session["excluded_from"])
+        self.assertFalse(session["hidden"])
+        self.assertEqual([row["body"] for row in store.history(sid)], ["First reply", "Later reply"])
+        self.assertEqual(len(store.alerts_after(0)[0]), 1)
+
+    def test_move_past_empty_excluded_placeholder_keeps_both_projects(self):
+        research = self.store.group("Research")
+        placeholder = self.store.group("Thesis", research)
+        self.store.set_project_status(placeholder, "excluded")
+        thesis = self.store.group("Thesis")
+        session = self.store.session("Codex", "local", "thesis", "Thesis")
+
+        self.store.move_group(thesis, research)
+        groups = {group["id"]: group for group in self.store.state()["groups"]}
+        self.assertEqual((groups[thesis]["name"], groups[thesis]["parent_id"]), ("Thesis", research))
+        self.assertEqual(groups[placeholder]["name"], "Thesis (empty)")
+        self.assertEqual(groups[placeholder]["workspace_status"], "excluded")
+        self.assertEqual(self.store.session_row(session)["group_id"], thesis)
+
+    def test_reorder_projects_keeps_siblings_and_descendants_in_place(self):
+        research = self.store.group("Research")
+        study = self.store.group("Study")
+        alpha = self.store.group("Alpha", research)
+        beta = self.store.group("Beta", research)
+        gamma = self.store.group("Gamma", research)
+        leaf = self.store.group("Notes", gamma)
+        sid = self.store.session("Codex", "local", "thread", "Research")
+        self.store.edit(sid, {"group": leaf})
+        self.store.reorder_group(gamma, alpha, "before")
+        self.store.reorder_group(alpha, beta, "after")
+        self.store.move_group(gamma, research)
+        new = self.store.group("A new project", research)
+        with self.assertRaisesRegex(ValueError, "same level"):
+            self.store.reorder_group(gamma, study, "before")
+
+        reopened = Store(self.store.path)
+        self.addCleanup(reopened.db.close)
+        groups = reopened.state()["groups"]
+        self.assertEqual([g["id"] for g in groups if g["parent_id"] == research], [gamma, beta, alpha, new])
+        self.assertEqual(next(g["parent_id"] for g in groups if g["id"] == leaf), gamma)
+        self.assertEqual(reopened.session_row(sid)["group_id"], leaf)
+
+    def test_codex_history_import_pages_messages_and_skips_existing_threads(self):
+        existing = self.store.session("Codex", "original-profile", "existing", "Research")
+
+        class AppServer:
+            async def call(self, method, params):
+                if method == "thread/list":
+                    if "cursor" not in params:
+                        return {"data": [{"id": "existing"}, {"id": "history", "name": "Research notes"}],
+                                "nextCursor": "last"}
+                    return {"data": [{"id": "temporary", "ephemeral": True}], "nextCursor": None}
+                if method == "thread/items/list" and params["threadId"] == "history":
+                    if "cursor" not in params:
+                        items = [
+                            {"type": "userMessage", "id": "prompt", "content": [{"type": "text", "text": "Question"}]},
+                            {"type": "agentMessage", "id": "note", "text": "Work in progress", "phase": "commentary"},
+                        ]
+                        return {"data": [{"item": item} for item in items], "nextCursor": "reply"}
+                    item = {"type": "agentMessage", "id": "answer", "text": "Answer", "phase": "final_answer"}
+                    return {"data": [{"item": item}], "nextCursor": None}
+                raise AssertionError(f"Unexpected App Server call: {method}")
+
+        first = asyncio.run(import_codex_history(self.store, AppServer()))
+        second = asyncio.run(import_codex_history(self.store, AppServer()))
+        self.assertEqual(first, {"added": 1, "already_indexed": 1, "failed": 0, "messages": 2})
+        self.assertEqual(second, {"added": 0, "already_indexed": 2, "failed": 0, "messages": 0})
+        self.assertEqual(self.store.session("Codex", "local", "existing", "Other"), existing)
+        imported = self.store.session("Codex", "original-profile", "history", "Other")
+        self.assertEqual(self.store.session_row(imported)["group_id"], self.store.group("Unclassified"))
+        self.assertEqual([message["body"] for message in self.store.history(imported)], ["Question", "Answer"])
+        self.assertFalse(self.store.alerts_after(0)[0])
+
+    def test_new_local_and_web_sessions_share_unclassified_project(self):
+        service = Service(self.root / "default-project", self.root, self.root, 12345)
+        self.addCleanup(service.lock.close)
+        store = service.store
+        self.addCleanup(store.db.close)
+        research = store.group("Research")
+        codex_path = self.root / "codex.jsonl"
+        codex_path.write_text(json.dumps({"type": "session_meta", "payload": {"id": "local", "cwd": "/tmp/some-repo"}}) + "\n")
+        scan_file(store, codex_path, "Codex")
+        import_export(store, "ChatGPT", "Personal", [{"id": "export", "mapping": {}}])
+        live = service.web_sync({"provider": "Claude", "account": "Work", "source": "live-chat",
+                                 "tab": "live-tab-000001", "messages": []})
+        state = store.state()
+        unclassified = next(g["id"] for g in state["groups"] if g["name"] == "Unclassified")
+        self.assertEqual({g["name"] for g in state["groups"]}, {"Research", "Unclassified"})
+        self.assertEqual(len(state["sessions"]), 3)
+        self.assertTrue(all(s["group_id"] == unclassified for s in state["sessions"]))
+        store.edit(live["session"], {"group": research})
+        import_export(store, "Claude", "Work", [{"uuid": "live-chat", "chat_messages": []}])
+        self.assertEqual(store.session_row(live["session"])["group_id"], research)
+
+    def test_project_status_applies_to_its_branch_and_preserves_session_status(self):
+        service = Service(self.root / "folders", self.root, self.root, 12345)
+        self.addCleanup(service.lock.close)
+        store = service.store
+        self.addCleanup(store.db.close)
+        research = store.group("Research")
+        branch = store.group("Agents", research)
+        leaf = store.group("Evaluations", branch)
+        sid = store.session("Codex", "local", "11111111-1111-1111-1111-111111111111", "Research")
+        store.edit(sid, {"group": leaf, "workspace_status": "active"})
+        store.set_project_status(research, "active")
+        groups = {g["id"]: g for g in store.state()["groups"]}
+        self.assertEqual(groups[leaf]["effective_status"], "active")
+        self.assertEqual(groups[leaf]["workspace_status"], "default")
+        service.codex_ok = True
+        draft = {"id": "folder-status-0001", "session": sid, "body": "Continue"}
+        service.enqueue(draft)
+        store.message(sid, "before", "assistant", "A visible reply", time.time())
+
+        store.set_project_status(branch, "hidden")
+        session = store.session_row(sid)
+        self.assertEqual((session["workspace_status"], session["effective_status"], session["group_id"]),
+                         ("active", "hidden", leaf))
+        self.assertFalse(store.state()["inbox"])
+        self.assertFalse(store.alerts_after(0)[0])
+        self.assertEqual(service.enqueue(draft)["status"], "failed")
+        self.assertFalse(service.begin_local_delivery(draft["id"]))
+
+        store.set_project_status(research, "excluded")
+        self.assertEqual(store.session_row(sid)["effective_status"], "excluded")
+        store.message(sid, "during", "assistant", "A quiet reply", time.time())
+        with self.assertRaisesRegex(ValueError, "excluded"):
+            service.enqueue({**draft, "id": "folder-status-0002"})
+
+        store.set_project_status(research, "default")
+        self.assertEqual(store.session_row(sid)["effective_status"], "hidden")
+        store.set_project_status(branch, "default")
+        session = store.session_row(sid)
+        self.assertEqual((session["workspace_status"], session["effective_status"], session["group_id"]),
+                         ("active", "active", leaf))
+        self.assertEqual(len(store.alerts_after(0)[0]), 1)
 
     def test_import_selected_branch_and_accounts(self):
         c={'id':'abc','title':'A','current_node':'good','mapping':{

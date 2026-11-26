@@ -2,7 +2,6 @@
 import json
 import time
 from datetime import datetime
-from pathlib import Path
 
 from .store import ident
 
@@ -19,6 +18,17 @@ def plain(content):
     return '\n'.join(str(v.get('text') or '') for v in content if isinstance(v,dict) and str(v.get('type','')).lower() in ('text','input_text','output_text'))
 
 
+def codex_message(item):
+    kind = item.get("type", "").lower()
+    if kind not in ("usermessage", "agentmessage") or item.get("phase") == "commentary":
+        return None
+    body = plain(item.get("content")) or item.get("text", "")
+    if not isinstance(body, str) or not body.strip() or body.lstrip().startswith(
+            ("<environment_context>", "<local-command", "<INSTRUCTIONS>")):
+        return None
+    return ("user" if kind == "usermessage" else "assistant"), body
+
+
 def consume(store,j,meta,kind,path,offset):
     typ=j.get("type")
     ts=epoch(j.get("timestamp"))
@@ -27,7 +37,7 @@ def consume(store,j,meta,kind,path,offset):
         if typ=="session_meta":
             cwd=p.get("cwd","");source=p.get("id") or p.get("session_id")
             if source:
-                meta['sid']=store.session(kind,p.get('creator_account_id') or 'local',source,Path(cwd).name,cwd=cwd)
+                meta['sid']=store.session(kind,p.get('creator_account_id') or 'local',source,cwd=cwd)
             return
         sid=meta.get('sid')
         if not sid:return
@@ -37,11 +47,11 @@ def consume(store,j,meta,kind,path,offset):
                 state='run' if tag=='task_started' else 'idle'
                 store.db.execute("UPDATE sessions SET state=? WHERE id=?",(state,sid))
             if tag=='item_completed':
-                item=p.get('item',{}); it=item.get('type','').lower()
-                if it in ('usermessage','agentmessage') and item.get('phase')!='commentary':
-                    body=plain(item.get('content')); role='user' if it=='usermessage' else 'assistant'
-                    if body and not body.lstrip().startswith(('<environment_context>','<local-command','<INSTRUCTIONS>')):
-                        store.message(sid,item.get('id') or ident(ts,body),role,body,ts)
+                item=p.get('item',{})
+                message=codex_message(item)
+                if message:
+                    role,body=message
+                    store.message(sid,item.get('id') or ident(ts,body),role,body,ts)
                 meta['modern']=True
             elif tag in ('user_message','agent_message') and not meta.get('modern'):
                 body=p.get('message','')
@@ -50,7 +60,7 @@ def consume(store,j,meta,kind,path,offset):
     if typ not in ('assistant','user','custom-title') or j.get('isSidechain') or j.get('isMeta'):return
     if not meta.get('sid'):
         source=j.get('sessionId') or path.stem;cwd=j.get('cwd') or ''
-        meta['sid']=store.session(kind,'local',source,Path(cwd).name,cwd=cwd)
+        meta['sid']=store.session(kind,'local',source,cwd=cwd)
     sid=meta['sid']
     if typ=='custom-title':
         store.db.execute("UPDATE sessions SET title=? WHERE id=?",(str(j.get('customTitle',''))[:240],sid));return
@@ -120,7 +130,7 @@ def import_conversation(store,provider,account,c):
         if not isinstance(batch,list):return 0
         msgs=[(m.get('uuid'),{'human':'user','assistant':'assistant'}.get(m.get('sender')),m.get('text') or plain(m.get('content')),epoch(m.get('created_at'))) for m in batch]
         url='https://claude.ai/chat/'+uid
-    sid=store.session(provider,account,uid,provider+' · '+account,str(c.get('title') or c.get('name') or ''),url=url)
+    sid=store.session(provider,account,uid,title=str(c.get('title') or c.get('name') or ''),url=url)
     seen={}
     for n,(source,role,body,at) in enumerate(msgs):
         store.merge_message(sid,source or ident(n,role,body,at),role,body,at,True,seen,False)
