@@ -103,6 +103,8 @@ class SearchTests(unittest.TestCase):
         target=atlas.thread('billing','Billing sync notes',('human',older),('assistant','Noted.'),
                             ('human','Rename the CSV columns.'),('assistant','Renamed the CSV columns.'))
         decoy=atlas.thread('invoice','Invoice layout',('human','Make it green.'),('assistant','The payment button is now green.'))
+        # Words that only begin like a query term ("retrieve" for "retry") do not match.
+        atlas.thread('logs','Log export',('human','We will retrieve the logs tonight.'),('assistant','Retrieved.'))
         found=atlas.search('payment retry policy')
         self.assertEqual([found[0]['session'],found[0]['seq']],[target,atlas.seq(target,older)])
         self.assertIn(older,found[0]['snippet'])
@@ -161,19 +163,22 @@ class SearchTests(unittest.TestCase):
         vocabulary=[''.join(rng.choice('bcdfghklmnprstvz')+rng.choice('aeiou') for _ in range(rng.randint(2,4))) for _ in range(5000)]
         # The query's topic words each appear in a few percent of the messages, as a busy project's terms would.
         vocabulary+=['payment']*8+['retry']*5
+        # Words like these turn up in most messages of a coding project.
+        vocabulary+=['test','error','code','file']*200
         with closing(sqlite3.connect(self.data/'atlas.sqlite')) as db,db:
             db.execute("INSERT INTO groups VALUES('g','Load')")
             db.executemany("INSERT INTO sessions(id,provider,account,source,title,group_id) VALUES(?,'Claude','Load',?,?,'g')",
                            [('s'+str(n),'s'+str(n),'Load '+str(n)) for n in range(1000)])
             db.executemany("INSERT INTO messages(session,source_id,role,body,at,alert) VALUES(?,?,?,?,?,0)",
-                           (('s'+str(n%1000),str(n),'assistant' if n%2 else 'user',' '.join(rng.choices(vocabulary,k=rng.randint(12,60))),n)
+                           (('s'+str(n%1000),str(n),'assistant' if n%2 else 'user',' '.join(rng.choices(vocabulary,k=rng.randint(12,300))),n)
                             for n in range(100000)))
         atlas=self.start()
-        self.assertEqual(len(atlas.search('payment retry policy')),20)
-        timings=[]
-        for _ in range(5):
-            start=time.perf_counter();atlas.search('payment retry policy');timings.append(time.perf_counter()-start)
-        self.assertLess(statistics.median(timings),.1,timings)
+        for query in ['payment retry policy','where did we leave the test error in the code file']:
+            self.assertEqual(len(atlas.search(query)),20)
+            timings=[]
+            for _ in range(5):
+                start=time.perf_counter();atlas.search(query);timings.append(time.perf_counter()-start)
+            self.assertLess(statistics.median(timings),.1,(query,timings))
 
 
 if __name__=='__main__':unittest.main()
