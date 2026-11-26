@@ -278,13 +278,10 @@ class Store:
         # The queries below read one snapshot, so an edit in between cannot drop a ranked message's excerpt.
         self.db.execute("BEGIN")
         try:
-            # bm25() gives a term found in over half the messages almost no weight, yet ranking every message it is in
-            # is what makes a search slow, so such terms are left out. When every term is that common, the most
-            # recently stored messages rank first.
+            # Terms in over half the messages are skipped; when all are, the newest messages rank first.
             total=self.db.execute("SELECT count(*) FROM messages").fetchone()[0]
             distinct=[w for w in words if 2*self.db.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?",(match([w]),)).fetchone()[0]<=total]
             query,order=(match(distinct),'f.rank') if distinct else (match(words),'f.rowid DESC')
-            # Messages arrive best first, so the first one seen from a session is its best.
             best={}
             rows=self.db.execute(f"""SELECT m.session,m.seq,m.role,m.at FROM messages_fts f JOIN messages m ON m.seq=f.rowid
               JOIN sessions s ON s.id=m.session WHERE messages_fts MATCH ? AND s.hidden=0 AND (? IS NULL OR s.provider=?)
