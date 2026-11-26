@@ -157,6 +157,23 @@ class SearchTests(unittest.TestCase):
         found=atlas.search('결제 재시도 정책 어디까지 했지?')
         self.assertEqual([(f['session'],f['seq']) for f in found],[(sid,atlas.seq(sid,body))])
 
+    def test_search_keeps_threads_behind_a_busy_one(self):
+        self.start().stop()
+        with closing(sqlite3.connect(self.data/'atlas.sqlite')) as db,db:
+            db.execute("INSERT INTO groups VALUES('g','Books')")
+            db.executemany("INSERT INTO sessions(id,provider,account,source,title,group_id) VALUES(?,'Claude','Books',?,?,'g')",
+                           [(n,n,n.title()) for n in ('busy','quiet','other','notes')])
+            db.executemany("INSERT INTO messages(session,source_id,role,body,at,alert) VALUES('notes',?,'user',?,?,0)",
+                           [(str(n),'Unrelated note '+str(n)+'.',n) for n in range(2000)])
+            # One thread mentions the topic in 1,500 short messages, each a stronger match than the other threads' one.
+            db.executemany("INSERT INTO messages(session,source_id,role,body,at,alert) VALUES('busy',?,'assistant',?,?,0)",
+                           [(str(n),'Ledger reconciliation run '+str(n)+'.',n) for n in range(1500)])
+            db.executemany("INSERT INTO messages(session,source_id,role,body,at,alert) VALUES(?,'1','user',?,2000,0)",
+                           [(n,'Before closing the books we still owe the '+n+' ledger reconciliation and a review of the vendor list.')
+                            for n in ('quiet','other')])
+        found=self.start().search('ledger reconciliation')
+        self.assertEqual([found[0]['session'],sorted(f['session'] for f in found[1:])],['busy',['other','quiet']])
+
     def test_search_is_fast_on_100k_messages(self):
         self.start().stop()
         rng=random.Random(7)
@@ -172,8 +189,13 @@ class SearchTests(unittest.TestCase):
             db.executemany("INSERT INTO messages(session,source_id,role,body,at,alert) VALUES(?,?,?,?,?,0)",
                            (('s'+str(n%1000),str(n),'assistant' if n%2 else 'user',' '.join(rng.choices(vocabulary,k=rng.randint(12,300))),n)
                             for n in range(100000)))
+            # One thread holds most of the matches for a topic, and each of them outranks every other thread's match.
+            db.executemany("INSERT INTO messages(session,source_id,role,body,at,alert) VALUES('s0',?,'assistant',?,?,0)",
+                           (('ledger-'+str(n),'Ledger reconciliation run '+str(n)+'.',100000+n) for n in range(20000)))
+            db.executemany("INSERT INTO messages(session,source_id,role,body,at,alert) VALUES(?,'ledger','user',?,120000,0)",
+                           (('s'+str(n),' '.join(rng.choices(vocabulary,k=100))+' ledger reconciliation') for n in range(1,100)))
         atlas=self.start()
-        for query in ['payment retry policy','where did we leave the test error in the code file']:
+        for query in ['payment retry policy','where did we leave the test error in the code file','ledger reconciliation']:
             self.assertEqual(len(atlas.search(query)),20)
             timings=[]
             for _ in range(5):

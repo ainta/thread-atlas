@@ -268,28 +268,43 @@ class Store:
           ORDER BY at,seq""",(key,at,at,seq,key,at,at,seq))]
 
     def search(self,text,provider=None):
-        """Visible sessions ranked by their best-matching message, each with that message's excerpt."""
+        """Visible sessions ranked by their best-matching message. Each comes with that message's excerpt, the query
+        terms it contains, and whether it is the session's latest reply."""
         words=terms(text)
         if not words:return []
         # English terms are matched by their Porter stem; Korean terms by prefix, so particles still attached to the
         # indexed word ("정책은") do not stop the bare term ("정책") from matching.
         match=lambda ws:' OR '.join('"'+w+'"'+('' if w.isascii() else '*') for w in ws)
-        # bm25() gives a term found in over half the messages almost no weight, yet ranking every message it is in is
-        # what makes a search slow, so such terms are left out. When every term is that common, newer messages rank first.
-        total=self.db.execute("SELECT count(*) FROM messages").fetchone()[0]
-        distinct=[w for w in words if 2*self.db.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?",(match([w]),)).fetchone()[0]<=total]
-        query,score,order=(match(distinct),'f.rank','f.rank') if distinct else (match(words),'-f.rowid','f.rowid DESC')
-        # Only the best 1,000 visible messages are grouped. Bare columns come from the row holding the session's best
-        # score. Excerpts are cut only for the messages returned.
-        best=[dict(r) for r in self.db.execute(f"""SELECT session,seq,role,at FROM
-          (SELECT session,seq,role,at,min(score) best FROM
-            (SELECT m.session,m.seq,m.role,m.at,{score} score FROM messages_fts f JOIN messages m ON m.seq=f.rowid JOIN sessions s ON s.id=m.session
-             WHERE messages_fts MATCH ? AND s.hidden=0 AND (? IS NULL OR s.provider=?) ORDER BY {order} LIMIT 1000)
-           GROUP BY session) ORDER BY best LIMIT 20""",(query,provider,provider))]
-        excerpts=dict(self.db.execute(f"""SELECT rowid,snippet(messages_fts,0,'','','…',32) FROM messages_fts
-          WHERE messages_fts MATCH ? AND rowid IN ({','.join('?'*len(best))})""",(query,*[b['seq'] for b in best])))
-        for b in best:b['snippet']=excerpts[b['seq']]
-        return best
+        # The queries below read one snapshot, so an edit in between cannot drop a ranked message's excerpt.
+        self.db.execute("BEGIN")
+        try:
+            # bm25() gives a term found in over half the messages almost no weight, yet ranking every message it is in
+            # is what makes a search slow, so such terms are left out. When every term is that common, the most
+            # recently stored messages rank first.
+            total=self.db.execute("SELECT count(*) FROM messages").fetchone()[0]
+            distinct=[w for w in words if 2*self.db.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?",(match([w]),)).fetchone()[0]<=total]
+            query,order=(match(distinct),'f.rank') if distinct else (match(words),'f.rowid DESC')
+            # Messages arrive best first, so the first one seen from a session is its best.
+            best={}
+            rows=self.db.execute(f"""SELECT m.session,m.seq,m.role,m.at FROM messages_fts f JOIN messages m ON m.seq=f.rowid
+              JOIN sessions s ON s.id=m.session WHERE messages_fts MATCH ? AND s.hidden=0 AND (? IS NULL OR s.provider=?)
+              ORDER BY {order}""",(query,provider,provider))
+            for r in rows:
+                if r['session'] in best:continue
+                best[r['session']]=dict(r)
+                if len(best)==20:break
+            rows.close()
+            found=list(best.values());seqs=[b['seq'] for b in found];marks=','.join('?'*len(seqs))
+            excerpts=dict(self.db.execute(f"""SELECT rowid,snippet(messages_fts,0,'','','…',32) FROM messages_fts
+              WHERE messages_fts MATCH ? AND rowid IN ({marks})""",(query,*seqs)))
+            held={w:{r[0] for r in self.db.execute(f"SELECT rowid FROM messages_fts WHERE messages_fts MATCH ? AND rowid IN ({marks})",(match([w]),*seqs))} for w in words}
+            # The latest reply is stored as text, so the newest assistant message with that text is the one it shows.
+            latest={r[0] for r in self.db.execute(f"""SELECT (SELECT m.seq FROM messages m WHERE m.session=s.id AND +m.role='assistant'
+              AND substr(m.body,1,2200)=s.latest ORDER BY m.at DESC,m.seq DESC LIMIT 1) FROM sessions s WHERE s.id IN ({marks})""",list(best))}
+        finally:self.db.execute("COMMIT")
+        for b in found:
+            b.update(snippet=excerpts[b['seq']],terms=[w for w in words if b['seq'] in held[w]],latest=b['seq'] in latest)
+        return found
 
     def alerts_after(self,after):
         limit=100
