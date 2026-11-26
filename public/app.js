@@ -1,4 +1,4 @@
-import {route} from './router.js';
+import {named,route} from './router.js';
 const $=id=>document.getElementById(id);
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const load=(key,def)=>{try{return JSON.parse(localStorage.getItem('atlas:'+key))??def;}catch{return def;}};
@@ -62,7 +62,7 @@ function redraw(){
  renderChat();preview();
 }
 function plan(text,hits){return route(text,state.sessions,focus,$('mode').value,locked,hits);}
-async function search(q){const hits=await api('search?q='+encodeURIComponent(q));if(q===$('prompt').value.trim())found={q,hits};return hits;}
+async function search(q){const provider=named(q),hits=await api('search?q='+encodeURIComponent(q)+(provider?'&provider='+encodeURIComponent(provider):''));if(q===$('prompt').value.trim())found={q,hits};return hits;}
 function preview(){
  const value=$('prompt').value.trim(),target=item(focus);
  if(!value&&target&&!target.hidden){$('dest').innerHTML='↳ '+escape(path(target))+' · '+escape(target.provider)+' <button type="button" data-clear>'+l('Clear','해제')+'</button>';return;}
@@ -105,7 +105,9 @@ async function refresh(force=false){
  }catch(e){$('statusline').textContent=l('Disconnected · ','연결 끊김 · ')+e.message;}finally{polling=false;}
 }
 async function detail(id,seq){
- const i=item(id);if(!i)return;const history=await api('history?id='+encodeURIComponent(id)+(seq?'&seq='+seq:''));await api('edit',{id,read:true});
+ const i=item(id);if(!i)return;const history=await api('history?id='+encodeURIComponent(id)+(seq?'&seq='+seq:''));
+ // A window around an older message leaves newer replies unseen.
+ if(!seq)await api('edit',{id,read:true});
  dialog(name(i),'<p class="sub">'+escape(i.provider)+' · '+escape(i.account)+' · '+escape(path(i))+'</p><p>'+escape(status(i))+' · '+l('Last seen ','마지막 확인 ')+stamp(i.synced_at)+'</p><div class="actions"><button class="choice" data-pick="'+i.id+'">'+l('Reply here','이어서 답장')+'</button><button class="choice" data-hide="'+i.id+'">'+l('Hide','숨김')+'</button>'+(i.url?'<a class="choice" target="_blank" rel="noopener noreferrer" href="'+escape(i.url)+'">'+l('Open original','원본 열기')+'</a>':'')+'</div><label class="modalfield">'+l('Move to project','프로젝트 이동')+'<select id="moveSelect">'+state.groups.map(g=>'<option value="'+g.id+'" '+(g.id===i.group_id?'selected':'')+'>'+escape(g.name)+'</option>').join('')+'</select></label><div class="history">'+history.map(m=>'<section data-seq="'+m.seq+'"'+(String(m.seq)===seq?' class="match"':'')+'><strong>'+escape(m.role)+'</strong> <small>'+stamp(m.at)+'</small><p>'+escape(m.body)+'</p></section>').join('')+'</div>');
  $('moveSelect').onchange=async e=>{try{await edit(id,{group:e.target.value});$('dialog').close();}catch(e){toast(e.message);}};const hist=$('dialogContent').querySelector('.history'),match=hist.querySelector('.match');if(match)match.scrollIntoView({block:'center'});else hist.scrollTop=hist.scrollHeight;await refresh(true);
 }
@@ -113,9 +115,8 @@ async function edit(id,changes){await api('edit',{id,...changes});await refresh(
 async function handle(i,body,action,key,match){
  if(!i||i.hidden)throw Error(l('Session unavailable','세션을 사용할 수 없습니다'));
  if(!action){pin(i.id,false);
-  // The message that matched is shown with the latest reply unless it is that reply. Times can be missing (0) until
-  // an export fills them in, so the reply is recognised by its text: the excerpt without its elided ends.
-  const older=match&&!(match.role==='assistant'&&(i.latest||'').includes(match.snippet.replace(/^…|…$/g,'')))?match:null;
+  // The message that matched is shown with the latest reply unless it is that reply.
+  const older=match&&!match.latest?match:null;
   push({kind:'source',session:i.id,path:path(i),provider:i.provider,at:i.latest_at,body:i.latest||l('No assistant reply yet.','아직 답변이 없습니다.'),match:older});return;}
  if(!i.direct){push({kind:'readonly',path:path(i),session:i.id,body});return;}
  const d=await api('send',{id:key,session:i.id,body});pin(i.id,false);push({kind:'delivery',session:i.id,key,body,path:path(i),status:d.status});await refresh(true);
