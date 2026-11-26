@@ -8,7 +8,6 @@ import os
 import re
 import secrets
 import sys
-import shutil
 import time
 import uuid
 import webbrowser
@@ -31,14 +30,18 @@ class Service:
         fcntl.flock(self.lock.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
         self.store=Store(data/'atlas.sqlite')
         self.store.db.execute("UPDATE deliveries SET status='uncertain',detail='Service restarted during dispatch' WHERE status IN ('sending','claimed')")
+        # A request that was still waiting when the service stopped is never sent later without the user asking again.
+        self.store.db.execute("UPDATE deliveries SET status='failed',detail='Service restarted before dispatch' WHERE status='queued' AND tab=''")
         self.store.db.execute("UPDATE sessions SET live_at=0,bridge='',writable=0")
         self.store.db.execute("UPDATE deliveries SET status='uncertain',detail='Reconnect to verify the reply' WHERE status='delivered' AND tab!=''")
+        self.store.db.execute("UPDATE deliveries SET status='uncertain',detail='Service restarted before the reply was confirmed' WHERE status='delivered' AND tab=''")
         self.codex_dir,self.claude_dir=codex_dir,claude_dir
         self.port=port;self.token=secrets.token_urlsafe(32);self.login=secrets.token_urlsafe(32)
         self.bridge=self.store.pref('bridge') or secrets.token_urlsafe(32)
         self.store.db.execute("INSERT OR IGNORE INTO prefs VALUES('bridge',?)",(self.bridge,))
         self.data=data;self.tasks=set();self.workers={};self.notifications=notifications
         self.scan_status='Indexing';self.codex_ok=False;self.claude_ok=False;self.last_scan=0;self.owned_terminals=set()
+        self.dispatch_note=''
         self.notification_seq=self.store.db.execute("SELECT COALESCE(max(seq),0) FROM messages").fetchone()[0]
 
     def spawn(self,coro):
@@ -49,19 +52,40 @@ class Service:
             try:
                 await asyncio.to_thread(scan,self.store,self.codex_dir,self.claude_dir)
                 self.last_scan=time.time();self.scan_status='Ready'
-                for row in self.store.db.execute("""SELECT m.seq,s.title,s.hidden FROM messages m JOIN sessions s ON s.id=m.session
+                for row in self.store.db.execute("""SELECT m.seq,s.title,s.provider,s.hidden FROM messages m JOIN sessions s ON s.id=m.session
                     WHERE m.alert=1 AND m.seq>? ORDER BY m.seq""",(self.notification_seq,)).fetchall():
                     self.notification_seq=row['seq']
-                    if not row['hidden']:await self.notify(row['title'])
+                    if not row['hidden']:await self.notify(row['seq'],row['title'],row['provider'])
             except Exception as e:self.scan_status='Index unavailable: '+type(e).__name__
             await asyncio.sleep(2)
 
-    async def notify(self,title):
+    async def mac_notification(self,seq,title,provider):
+        helper_name = 'Thread Atlas Alerts.app'
+        if ROOT.parent.name == 'Resources' and ROOT.parent.parent.name == 'Contents':
+            helper = ROOT.parent.parent / 'Helpers' / helper_name
+        else:
+            helper = self.data / helper_name
+            source = ROOT / 'macos' / 'alerts.swift'
+            builder = ROOT / 'macos' / 'build-alerts.sh'
+            executable = helper / 'Contents' / 'MacOS' / 'Alerts'
+            if not executable.exists() or executable.stat().st_mtime < max(source.stat().st_mtime,builder.stat().st_mtime):
+                await output(str(builder),str(helper),timeout=90)
+        events = self.data / 'notification-events'
+        events.mkdir(mode=0o700,exist_ok=True)
+        event = events / (str(seq) + '.atlasreply')
+        event.write_text(json.dumps({'title':title,'provider':provider}),encoding='utf-8')
+        try:
+            await output('/usr/bin/open','-g','-a',str(helper),str(event.resolve()))
+        except Exception:
+            event.unlink(missing_ok=True)
+            raise
+
+    async def notify(self,seq,title,provider):
         if self.store.pref('notifications','1' if self.notifications else '0')!='1':return
-        if shutil.which('osascript'):
-            script='on run argv\n display notification (item 1 of argv) with title "Thread Atlas"\nend run'
-            try:await output('osascript','-e',script,'--',title,timeout=5)
-            except Exception:pass
+        if sys.platform == 'darwin':
+            try:await self.mac_notification(seq,title,provider)
+            except (OSError,RuntimeError,asyncio.TimeoutError) as e:
+                print('Could not post macOS notification: '+str(e),file=sys.stderr)
         token=os.environ.get('ATLAS_TELEGRAM_TOKEN');chat=os.environ.get('ATLAS_TELEGRAM_CHAT')
         if token and chat:
             import aiohttp
@@ -123,17 +147,30 @@ class Service:
 
     async def dispatch(self):
         while True:
-            self.store.db.execute("""UPDATE deliveries SET status='uncertain',detail='Tab disconnected before acknowledgment'
-              WHERE status IN ('claimed','delivered') AND tab!='' AND updated<? AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id=deliveries.session AND s.live_at>strftime('%s','now')-35)""",(time.time()-65,))
-            self.store.db.execute("""UPDATE deliveries SET status='failed',detail='Tab disconnected before dispatch'
-              WHERE status='queued' AND tab!='' AND created<?""",(time.time()-75,))
-            rows=self.store.db.execute("""SELECT d.*,s.provider,s.source,s.cwd,s.hidden FROM deliveries d JOIN sessions s ON d.session=s.id
-             WHERE d.status='queued' AND s.provider NOT IN ('ChatGPT','Claude') ORDER BY d.created""").fetchall()
-            for row in rows:
-                sid=row['session']
-                if sid not in self.workers:
-                    self.workers[sid]=self.spawn(self.local_send(dict(row)))
+            # A busy database or one bad row must not end dispatch for the rest of the run; the next tick retries.
+            try:self.sweep();self.dispatch_note=''
+            except Exception as e:
+                note=type(e).__name__+': '+str(e)
+                if note!=self.dispatch_note:self.dispatch_note=note;print('Dispatch paused · '+note,file=sys.stderr)
             await asyncio.sleep(.3)
+
+    def sweep(self):
+        now=time.time();db=self.store.db
+        db.execute("""UPDATE deliveries SET status='uncertain',detail='Tab disconnected before acknowledgment'
+          WHERE status IN ('claimed','delivered') AND tab!='' AND updated<? AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id=deliveries.session AND s.live_at>?)""",(now-65,now-35))
+        # A claim the tab never acknowledged would otherwise hold the thread's queue for as long as the tab stays open.
+        db.execute("""UPDATE deliveries SET status='uncertain',detail='No acknowledgment from the tab'
+          WHERE status='claimed' AND tab!='' AND updated<?""",(now-120,))
+        # A request waits while its tab is connected and busy. It fails once that tab is gone, or after thirty minutes.
+        db.execute("""UPDATE deliveries SET status='failed',detail=CASE WHEN created<? THEN 'Thread stayed busy' ELSE 'Tab disconnected before dispatch' END
+          WHERE status='queued' AND tab!='' AND (created<? OR (created<? AND NOT EXISTS
+            (SELECT 1 FROM sessions s WHERE s.id=deliveries.session AND s.bridge=deliveries.tab AND s.live_at>?)))""",(now-1800,now-1800,now-75,now-35))
+        rows=db.execute("""SELECT d.*,s.provider,s.source,s.cwd,s.hidden FROM deliveries d JOIN sessions s ON d.session=s.id
+         WHERE d.status='queued' AND s.provider NOT IN ('ChatGPT','Claude') ORDER BY d.created""").fetchall()
+        for row in rows:
+            sid=row['session']
+            if sid not in self.workers:
+                self.workers[sid]=self.spawn(self.local_send(dict(row)))
 
     async def local_send(self,d):
         key=d['id'];started=False
@@ -153,6 +190,7 @@ class Service:
                         own=next((t for t in result['data'] if t['id']==turn),None)
                         if own and own['status'] in ('completed','failed','interrupted'):
                             self.update(key,'answered' if own['status']=='completed' else 'failed',turn);break
+                    else:raise RuntimeError('The turn did not finish within two hours')
             else:
                 agents=json.loads(await output('claude','agents','--json',timeout=15))
                 if not isinstance(agents,list):raise RuntimeError('Unable to determine session ownership')
@@ -166,7 +204,13 @@ class Service:
                 self.update(key,'answered',d['source'])
         except Exception as e:
             old=self.store.db.execute("SELECT status FROM deliveries WHERE id=?",(key,)).fetchone()[0]
-            if old!='delivered':self.update(key,'uncertain' if started else 'failed',str(e) or type(e).__name__)
+            note=str(e) or type(e).__name__
+            # A receipt that already reached a final state stays; one that was delivered but never confirmed must not rest there.
+            if old=='delivered':self.update(key,'uncertain','Delivered, but the reply was not confirmed: '+note)
+            elif old not in ('answered','failed'):self.update(key,'uncertain' if started else 'failed',note)
+            if old=='delivered' or (started and old not in ('answered','failed')):
+                self.store.db.execute("""UPDATE deliveries SET status='failed',detail='An earlier message to this thread was not confirmed',updated=?
+                  WHERE session=? AND status='queued' AND tab=''""",(time.time(),d['session']))
         finally:self.workers.pop(d['session'],None)
 
     def web_sync(self,d):
@@ -182,12 +226,18 @@ class Service:
             s=self.store.session_row(sid)
             if s['bridge'] and s['bridge']!=tab and time.time()-s['live_at']<35:raise ValueError('Thread already connected in another tab')
             self.store.db.execute("UPDATE sessions SET live_at=?,bridge=?,writable=?,state=? WHERE id=?",(time.time(),tab,int(bool(d.get('writable'))),'run' if d.get('busy') else 'idle',sid))
-            matched=set()
+            # A page shows no send time. History read on connect is filed after what is already known, so it neither
+            # looks new nor outranks real arrivals in the inbox. Only messages seen arriving are stamped with the clock.
+            initial=bool(d.get('initial'));seen={}
+            known=self.store.db.execute("SELECT COALESCE(max(at),0) FROM messages WHERE session=?",(sid,)).fetchone()[0] if initial else 0
             for m in d.get('messages',[])[:160]:
+                if not isinstance(m,dict):continue
                 body=m.get('text');role=m.get('role');mid=m.get('id')
                 if not isinstance(body,str) or role not in ('user','assistant') or not isinstance(mid,str):continue
-                self.store.merge_message(sid,mid,role,body,epoch(m.get('at')) or time.time(),
-                                         bool(d.get('initial')),matched,not d.get('initial'))
+                stamp=epoch(m.get('at'))
+                self.store.merge_message(sid,mid,role,body,stamp or (known if initial else time.time()),
+                                         initial,seen,not initial,estimated=not stamp)
+            if initial:self.store.finish_batch(sid,seen)
             job=None
             if not d.get('busy') and d.get('writable') and not s['hidden'] and not self.store.db.execute("SELECT 1 FROM deliveries WHERE session=? AND status IN ('claimed','delivered') AND tab!=''",(sid,)).fetchone():
                 row=self.store.db.execute("SELECT id,body FROM deliveries WHERE session=? AND tab=? AND status='queued' ORDER BY created LIMIT 1",(sid,tab)).fetchone()
@@ -231,6 +281,12 @@ def application(s):
         if req.method=='GET':
             if action=='state':value=s.snapshot(int(req.query['after']) if 'after' in req.query else None)
             elif action=='history':value=s.store.history(req.query['id'])
+            elif action=='reply':
+                seq=req.query.get('seq','')
+                if not re.fullmatch(r'[1-9][0-9]{0,18}',seq):raise ValueError('Invalid reply number')
+                row=s.store.db.execute("""SELECT m.session,m.seq,m.body,m.at FROM messages m
+                    JOIN sessions s ON s.id=m.session WHERE m.seq=? AND m.role='assistant' AND s.hidden=0""",(seq,)).fetchone()
+                value=dict(row) if row else None
             elif action=='pairing':value={'token':s.bridge,'port':s.port}
             else:raise web.HTTPNotFound()
         else:

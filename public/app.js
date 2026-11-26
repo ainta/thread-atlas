@@ -65,7 +65,7 @@ function preview(){
  const value=$('prompt').value.trim(),target=item(focus);
  if(!value&&target&&!target.hidden){$('dest').innerHTML='↳ '+escape(path(target))+' · '+escape(target.provider)+' <button type="button" data-clear>'+l('Clear','해제')+'</button>';return;}
  const p=value?plan():null;
- $('dest').textContent=!p?l('Destination · Match from message','보낼 곳 · 메시지에서 찾기'):!p.action?l('Search local history','내 기록에서 찾기'):p.candidates.length!==1?l('Choose a destination','대상 선택'):(p.candidates[0].direct?l('To · ','보낼 곳 · '):l('Read-only · ','읽기 전용 · '))+path(p.candidates[0])+' · '+p.candidates[0].provider;
+ $('dest').textContent=!p?l('Destination · Match from message','보낼 곳 · 메시지에서 찾기'):!p.action?l('Search local history','내 기록에서 찾기'):p.candidates.length!==1?l('Choose a destination','대상 선택'):p.confirm?l('Confirm before sending · ','전송 전 확인 · ')+path(p.candidates[0])+' · '+p.candidates[0].provider:(p.candidates[0].direct?l('To · ','보낼 곳 · '):l('Read-only · ','읽기 전용 · '))+path(p.candidates[0])+' · '+p.candidates[0].provider;
 }
 function pin(id,explicit){const i=item(id);if(!i||i.hidden)return;focus=id;locked=explicit;save('target',focus);save('locked',locked);folded.delete(i.group_id);save('folded',[...folded]);view='map';filter=null;redraw();}
 function push(m){messages.push(m);messages=messages.slice(-70);save('chat',messages);renderChat();}
@@ -120,7 +120,7 @@ $('composer').onsubmit=async e=>{
  const submit=$('composer').querySelector('[type=submit]');if(submit.disabled)return;submit.disabled=true;
  try{if(!messages.some(m=>m.kind==='user'&&m.key===key))push({kind:'user',body,key});
   if(!p.candidates.length)push({kind:'info',body:l('No matching visible session.','일치하는 세션이 없습니다.')});
-  else if(p.candidates.length===1&&!p.waiting)await handle(p.candidates[0],body,p.action,key);
+  else if(p.candidates.length===1&&!p.waiting&&!p.confirm)await handle(p.candidates[0],body,p.action,key);
   else push({kind:'choose',ids:p.candidates.map(i=>i.id),body,action:p.action,key});
   if($('prompt').value.trim()===body){$('prompt').value='';save('draft','');draftID=null;save('draftID',null);}preview();
  }catch(err){toast(err.message);}finally{submit.disabled=false;}
@@ -169,4 +169,17 @@ document.addEventListener('dragend',()=>{dragging=false;clean();});
 document.addEventListener('drop',async e=>{const z=zone(e),id=e.dataTransfer.getData('application/x-thread-atlas');dragging=false;clean();if(!z||!item(id))return;e.preventDefault();
  try{if(z.id==='hiddenDrop')await edit(id,{hidden:true});else if(z.id==='composer'){pin(id,true);$('mode').value='send';preview();$('prompt').focus();}else await edit(id,{group:z.dataset.group,before:e.target.closest('[data-card]')?.dataset.card});}catch(err){toast(err.message);}
 });
-$('prompt').value=load('draft','');applyLanguage();await refresh(true);setInterval(()=>refresh(),2000);
+async function openNotification() {
+ const match=/^#reply-([1-9][0-9]{0,18})$/.exec(location.hash);
+ if(!match && location.hash!=='#inbox')return;
+ view='inbox';filter=null;redraw();
+ if(!match)return;
+ try {
+  const reply=await api('reply?seq='+match[1]);
+  const thread=reply&&item(reply.session);
+  if(!thread||thread.hidden){toast(l('This reply is no longer visible.','이 답변은 현재 볼 수 없습니다.'));return;}
+  dialog(name(thread),'<p class="sub">'+escape(thread.provider)+' · '+stamp(reply.at)+'</p><div class="history"><section><p>'+escape(reply.body)+'</p></section></div><div class="actions"><button class="choice" data-card="'+thread.id+'">'+l('View source','원문 보기')+'</button><button class="choice" data-pick="'+thread.id+'">'+l('Reply here','이어서 답장')+'</button></div>');
+ } catch(err){toast(err.message);}
+}
+$('prompt').value=load('draft','');applyLanguage();await refresh(true);
+window.addEventListener('hashchange',openNotification);await openNotification();setInterval(()=>refresh(),2000);

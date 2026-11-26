@@ -17,26 +17,39 @@ function bubbles(){
  const chatgpt='[data-message-author-role], main .bg-user-message .whitespace-pre-wrap, main [class*="DilResponseRoot-"], main [class*="MarkdownRoot-"]';
  const claude='[data-testid="user-message"],[data-testid="assistant-message"],.font-claude-response';
  const nodes=[...document.querySelectorAll(gpt?chatgpt:claude)].filter(visible);
- const messages=[];
- for(const [pos,el] of nodes.entries()){
+ const messages=[],repeats=new Map();
+ for(const el of nodes){
   if(nodes.some(other=>other!==el&&other.contains(el)))continue;
   const role=gpt?(el.dataset.messageAuthorRole||(el.closest('.bg-user-message')?'user':'assistant')):(el.matches('[data-testid="user-message"]')?'user':'assistant');
   if(!['user','assistant'].includes(role))continue;
   const body=(el.innerText||'').trim();if(!body)continue;
   const parent=el.closest('[data-message-id],[data-message-uuid]');
-  const id=parent?.dataset.messageId||parent?.dataset.messageUuid||el.id||'dom-'+role+'-'+pos+'-'+hash(body);
+  // Without a page-provided ID, a bubble is known by its text and how often that text has appeared, not by its
+  // position, so loading earlier messages or a re-render does not turn the whole conversation into new messages.
+  const mark=role+'-'+hash(body),nth=repeats.get(mark)||0;repeats.set(mark,nth+1);
+  const id=parent?.dataset.messageId||parent?.dataset.messageUuid||el.id||'dom-'+mark+'-'+nth;
   messages.push({id,role,text:body,at:0});
  }
  return messages.slice(-120);
 }
 function hash(value){let h=2166136261;for(const c of value){h=Math.imul(h^c.charCodeAt(0),16777619);}return (h>>>0).toString(16);}
+// Rich editors and message bubbles re-wrap lines, so sent text is compared without regard to whitespace.
+function flat(value){return String(value||'').replace(/\s+/g,' ').trim();}
+function drafted(box){return flat(box.value||box.innerText);}
+function clearDraft(box){
+ if(!box.isConnected||!drafted(box))return;
+ box.focus();
+ if(box.tagName==='TEXTAREA'){Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(box,'');box.dispatchEvent(new Event('input',{bubbles:true}));return;}
+ const range=document.createRange();range.selectNodeContents(box);
+ const selection=getSelection();selection.removeAllRanges();selection.addRange(range);document.execCommand('delete');
+}
 function same(){return connected&&observedSource===identity().source;}
 async function host(type,payload){return chrome.runtime.sendMessage({type,payload,source:identity().source,instance});}
 async function ack(id,status,detail=''){const result=await host('ack',{id,status,detail});if(result?.error)throw Error(result.error);}
 async function sendJob(job){
  if(!same()||busy()){await ack(job.id,'failed','Thread changed or is busy');return;}
  const box=editor();
- if(!visible(box)||(box.value||box.innerText||'').trim()){await ack(job.id,'failed','Composer unavailable or contains your own draft');return;}
+ if(!visible(box)||drafted(box)){await ack(job.id,'failed','Composer unavailable or contains your own draft');return;}
  const before=bubbles().filter(m=>m.role==='user').map(m=>m.id);
  box.focus();
  if(box.tagName==='TEXTAREA'){Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(box,job.body);box.dispatchEvent(new Event('input',{bubbles:true}));}
@@ -46,7 +59,13 @@ async function sendJob(job){
  const form=box.closest('form');
  const button=[...(form||document).querySelectorAll(controls)].filter(visible).at(-1)
    ||(form&&[...form.querySelectorAll('button[type="submit"]')].filter(visible).length===1?form.querySelector('button[type="submit"]'):null);
- if(!same()||!visible(button)||(box.value||box.innerText||'').trim()!==job.body.trim()){await ack(job.id,'failed','Could not verify the composer and send control');return;}
+ if(!same()||!visible(button)||drafted(box)!==flat(job.body)){
+  // Remove only the exact text this job inserted. If the composer now holds anything else, the person may have
+  // edited it during the pause, so it is theirs and stays untouched.
+  const ours=drafted(box)===flat(job.body);
+  if(ours)clearDraft(box);
+  await ack(job.id,'failed',ours?'Could not verify the send control':'Composer changed before sending; left it as it is');return;
+ }
  pending={id:job.id,body:job.body,before,at:Date.now(),user:null};button.click();
 }
 async function pulse(){
@@ -68,7 +87,7 @@ async function pulse(){
   for(const m of changed)observed.set(m.id,hash(m.text));
   initial=false;
   if(pending){
-   const user=all.find(m=>m.role==='user'&&!pending.before.includes(m.id)&&m.text.trim()===pending.body.trim());
+   const user=all.find(m=>m.role==='user'&&!pending.before.includes(m.id)&&flat(m.text)===flat(pending.body));
    if(user&&!pending.user){await ack(pending.id,'delivered');pending.user=user.id;}
    const pos=all.findIndex(m=>m.id===pending.user);
    if(pos>=0&&stable&&all.slice(pos+1).some(m=>m.role==='assistant')){await ack(pending.id,'answered');pending=null;}

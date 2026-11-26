@@ -29,3 +29,16 @@ const tests=[{id:'origin',title:'Login bug',latest:'Fixed.',project:'Auth'},
  {id:'other',title:'Regression tests',latest:'Run the tests.',project:'Other'}];
 assert.equal(route('Then run the tests',tests,'origin').candidates[0].id,'origin');
 assert.equal(route('Update regression tests',tests,'origin').candidates[0].id,'other');
+// A pinned reply target is not replaced because the message names another provider.
+const mixed=[{id:'pinned',provider:'Codex',title:'Payment retry policy',latest:'Retry budget is 3.',project:'payments'},
+ {id:'other',provider:'Claude Code',title:'Compare billing exports',latest:'Done comparing.',project:'billing'}];
+assert.equal(route('compare with what claude code suggested and proceed',mixed,'pinned','send',true).candidates[0].id,'pinned');
+assert.equal(route('rewrite this so claude can follow it',mixed,'pinned','send',true).candidates[0].id,'pinned');
+// A single incidental word, or being the only thread, asks for confirmation before sending.
+const crowd=Array.from({length:40},(_,n)=>({id:'s'+n,provider:'Codex',title:'Topic '+n,latest:'Reply about item'+n+'.',project:'p'+n%5}));
+crowd[17].latest='I rotated the quarterly credentials.';
+const weak=route('Draft an email to finance about the quarterly numbers',crowd,null);
+assert.deepEqual([weak.candidates.length,weak.candidates[0].id,weak.confirm],[1,'s17',true]);
+assert.equal(route('Book a dentist appointment',[mixed[0]],null).confirm,true);
+assert.equal(route('Update the payment retry budget',mixed,null).confirm,undefined);
+assert.equal(route('Where is the quarterly rotation?',crowd,null).confirm,undefined);
