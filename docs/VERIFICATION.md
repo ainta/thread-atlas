@@ -6,9 +6,13 @@ Two disposable Codex threads and two disposable Claude Code threads each receive
 
 ## Browser integration
 
-The automated browser run uses a real, isolated Chromium profile and the shipped Manifest V3 extension. ChatGPT-shaped and Claude-shaped pages are served by test fixtures. For each provider, a message sent in the dashboard appeared once in the source page, the fixture produced a distinct answer, the extension returned its receipt, and the source card updated. The test also exercised actual ZIP upload, read-only handoff, inbox readback, drag and drop, hiding, restoration after reload, language switching, unauthorized access rejection, and responsive layout at four viewport widths.
+The automated browser run uses a real, isolated Chromium profile and the shipped Manifest V3 extension. ChatGPT-shaped and Claude-shaped pages are served by test fixtures. For each provider, a message sent in the dashboard appeared once in the source page, the fixture produced a distinct answer, the extension returned its receipt, and the source card updated. The test also exercised actual ZIP upload, read-only handoff, inbox readback, drag and drop, hiding, restoration after reload, language switching, unauthorized access rejection, responsive layout at four viewport widths, and collapsing and expanding a 103-session map.
 
-These fixtures demonstrate the bridge and dashboard workflow. They do not establish compatibility with a current signed-in production ChatGPT or Claude web page.
+Read-only inspection of signed-in ChatGPT and Claude pages also identified visible message and composer elements. ChatGPT used newer response markup, which the extension and its test fixture now cover. Original-thread sends on the two production websites require a separately paired live test.
+
+## Native package
+
+The Apple Silicon menu-bar app launched the service on macOS. An independent cold start from its packaged launcher returned HTTP 200 for the dashboard and opened an isolated empty workspace. The bundle passed strict code-signature verification after executing, and its release ZIP passed archive integrity verification. The signature is ad hoc.
 
 ## Store and routing checks
 

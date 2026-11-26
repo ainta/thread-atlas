@@ -18,12 +18,14 @@ export function route(text,items,focus,mode='auto',locked=false){
   const generic=new Set('then test regression first again next 하나 다시 테스트 회귀 먼저'.split(' '));
   if(selected&&/^(?:then\b|그럼|그러면)/i.test(text.trim())&&query.every(q=>generic.has(q)))return {action,candidates:[selected]};
   const docs=pool.map(i=>({i,title:new Set(words(i.title)),body:new Set(words(i.latest)),group:new Set(words(i.project))}));
+  const weights=new Map();
+  for(const q of query){
+    const freq=docs.filter(x=>x.title.has(q)||x.body.has(q)||x.group.has(q)).length;
+    if(freq)weights.set(q,1+Math.log((docs.length+1)/(freq+1)));
+  }
   const scores=docs.map(d=>{
     let score=0;
-    for(const q of query){
-      const freq=docs.filter(x=>x.title.has(q)||x.body.has(q)||x.group.has(q)).length;
-      if(!freq)continue;
-      const weight=1+Math.log((docs.length+1)/(freq+1));
+    for(const [q,weight] of weights){
       score+=weight*(d.title.has(q)?3:d.body.has(q)?1.5:d.group.has(q)?0.65:0);
     }
     return {i:d.i,score};

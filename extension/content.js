@@ -6,16 +6,21 @@ function identity(){
  const route=location.pathname.match(location.hostname==='chatgpt.com'?/^\/(?:g\/[\w-]+\/)?c\/([\w-]+)\/?$/:/^\/chat\/([\w-]+)\/?$/);
  return {provider:location.hostname==='chatgpt.com'?'ChatGPT':'Claude',source:route?.[1],pathname:location.pathname.replace(/\/$/,''),instance};
 }
-function editor(){return document.querySelector('#prompt-textarea,textarea[data-testid="chat-input"],[contenteditable="true"].ProseMirror,[contenteditable="true"][role="textbox"],textarea[placeholder]');}
+function editor(){
+ const query='#prompt-textarea,textarea[data-testid="chat-input"],[contenteditable="true"].ProseMirror,[contenteditable="true"][role="textbox"],textarea[placeholder]';
+ return [...document.querySelectorAll(query)].filter(el=>visible(el)&&!el.closest('[data-message-author-role],[class~="group/user-message"]')).at(-1);
+}
 function visible(el){return Boolean(el&&el.getClientRects().length&&!el.disabled&&el.getAttribute('aria-disabled')!=='true');}
 function busy(){return [...document.querySelectorAll('button[data-testid="stop-button"],button[aria-label*="Stop" i],button[aria-label*="중지"],[data-is-streaming="true"]')].some(visible);}
 function bubbles(){
  const gpt=identity().provider==='ChatGPT';
- const nodes=[...document.querySelectorAll(gpt?'[data-message-author-role]':'[data-testid="user-message"],[data-testid="assistant-message"],.font-claude-response')];
+ const chatgpt='[data-message-author-role], main .bg-user-message .whitespace-pre-wrap, main [class*="DilResponseRoot-"], main [class*="MarkdownRoot-"]';
+ const claude='[data-testid="user-message"],[data-testid="assistant-message"],.font-claude-response';
+ const nodes=[...document.querySelectorAll(gpt?chatgpt:claude)].filter(visible);
  const messages=[];
  for(const [pos,el] of nodes.entries()){
   if(nodes.some(other=>other!==el&&other.contains(el)))continue;
-  const role=gpt?el.dataset.messageAuthorRole:(el.matches('[data-testid="user-message"]')?'user':'assistant');
+  const role=gpt?(el.dataset.messageAuthorRole||(el.closest('.bg-user-message')?'user':'assistant')):(el.matches('[data-testid="user-message"]')?'user':'assistant');
   if(!['user','assistant'].includes(role))continue;
   const body=(el.innerText||'').trim();if(!body)continue;
   const parent=el.closest('[data-message-id],[data-message-uuid]');
@@ -37,7 +42,10 @@ async function sendJob(job){
  if(box.tagName==='TEXTAREA'){Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(box,job.body);box.dispatchEvent(new Event('input',{bubbles:true}));}
  else document.execCommand('insertText',false,job.body);
  await new Promise(r=>setTimeout(r,150));
- const button=document.querySelector('button[data-testid="send-button"],button[aria-label*="send message" i],button[aria-label="Send" i],button[aria-label*="보내기"]');
+ const controls='button[data-testid="send-button"],button[data-testid="chat-input-send"],button[aria-label*="send message" i],button[aria-label="Send" i],button[aria-label*="보내기"]';
+ const form=box.closest('form');
+ const button=[...(form||document).querySelectorAll(controls)].filter(visible).at(-1)
+   ||(form&&[...form.querySelectorAll('button[type="submit"]')].filter(visible).length===1?form.querySelector('button[type="submit"]'):null);
  if(!same()||!visible(button)||(box.value||box.innerText||'').trim()!==job.body.trim()){await ack(job.id,'failed','Could not verify the composer and send control');return;}
  pending={id:job.id,body:job.body,before,at:Date.now(),user:null};button.click();
 }

@@ -20,9 +20,12 @@ const provider='PROVIDER';
 function bubble(role,text){
  const d=document.createElement('div');
  d.dataset.messageId=crypto.randomUUID();
- if(provider==='ChatGPT')d.dataset.messageAuthorRole=role;
+ if(provider==='ChatGPT'){
+   if(role==='user'){d.className='bg-user-message';const span=document.createElement('span');span.className='whitespace-pre-wrap';span.textContent=text;d.append(span);}
+   else {d.className='DilResponseRoot-fixture';const block=document.createElement('p');block.className='MarkdownRoot-fixture';block.textContent=text;d.append(block);}
+ }
  else d.dataset.testid=role+'-message';
- d.textContent=text;document.querySelector('main').append(d);
+ if(provider!=='ChatGPT')d.textContent=text;document.querySelector('main').append(d);
 }
 document.querySelector('button').onclick=()=>{
  const box=document.querySelector('textarea');bubble('user',box.value);box.value='';
@@ -67,6 +70,7 @@ def main():
                   return chrome.tabs.sendMessage(tab.id,{type:'activate'});
                 }""",{'url':url,'pairing':str(port)+':'+token})
                 assert not result.get('error'),result
+            page.bring_to_front()
             expect(page.locator('.card')).to_have_count(2,timeout=12000)
             for idx,(topic,marker) in enumerate([('Authentication review','ALPHA'),('Payment retry policy','BETA')]):
                 box=page.locator('#prompt');box.fill('Send a follow-up about '+topic)
@@ -109,8 +113,15 @@ def main():
             for width in (390,820,1024,1440):
                 page.set_viewport_size({'width':width,'height':900})
                 assert page.evaluate('document.documentElement.scrollWidth')<=width
+            batch=[{'uuid':'scale-'+str(n),'name':'Scale case '+str(n),'chat_messages':[
+                    {'uuid':'m-'+str(n),'sender':'assistant','text':'Fixture '+str(n)}]} for n in range(100)]
+            imported=page.request.post(origin+'/api/import',data={'provider':'Claude','account':'Scale','data':batch})
+            assert imported.ok
+            expect(page.locator('.card')).to_have_count(103,timeout=10000)
+            page.locator('#viewAction').click();expect(page.locator('.card')).to_have_count(0)
+            page.locator('#viewAction').click();expect(page.locator('.card')).to_have_count(103)
             assert not errors,errors
-            ctx.close();print('PASS: both extension DOM round trips, badge receipts, read-only ZIP import, lookup, routing, drag, hide/restore, reload, language switch, authorization, 4 widths.')
+            ctx.close();print('PASS: both extension DOM round trips, badge receipts, read-only ZIP import, lookup, routing, drag, hide/restore, reload, language switch, authorization, 4 widths, and a 103-session map.')
         finally:proc.terminate();proc.wait(timeout=20)
 
 

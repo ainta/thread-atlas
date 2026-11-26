@@ -12,7 +12,7 @@ On macOS, double-click **Start.command** or run it in a terminal. It starts a lo
 ./Start.command
 ```
 
-For a macOS menu-bar app, build and open the bundle. Building requires the Xcode command line tools. The menu can reopen the dashboard or reveal the extension folder. The collector continues running after you close the dashboard.
+The [v0.1.0 release](https://github.com/ainta/thread-atlas/releases/tag/v0.1.0) includes a locally built Apple Silicon menu-bar app. It uses the same Python runtime and is ad-hoc signed. For a native build on your own Mac, build and open the bundle. Building requires the Xcode command line tools. The menu can reopen the dashboard or reveal the extension folder. The collector continues running after you close the dashboard.
 
 ```sh
 ./macos/build.sh
