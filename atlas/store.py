@@ -5,6 +5,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 
 
@@ -50,12 +51,39 @@ CREATE INDEX IF NOT EXISTS pending ON deliveries(session,status,created);
 CREATE TABLE IF NOT EXISTS prefs(key TEXT PRIMARY KEY,value TEXT);
 """
 
+# Each entry upgrades a database from the version before it. `PRAGMA user_version` records how many have run.
+MIGRATIONS = ["""
+CREATE VIRTUAL TABLE messages_fts USING fts5(body,content='messages',content_rowid='seq',tokenize='porter unicode61 remove_diacritics 2');
+CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+ INSERT INTO messages_fts(rowid,body) VALUES(new.seq,new.body); END;
+CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+ INSERT INTO messages_fts(messages_fts,rowid,body) VALUES('delete',old.seq,old.body); END;
+CREATE TRIGGER messages_fts_update AFTER UPDATE OF body ON messages BEGIN
+ INSERT INTO messages_fts(messages_fts,rowid,body) VALUES('delete',old.seq,old.body);
+ INSERT INTO messages_fts(rowid,body) VALUES(new.seq,new.body); END;
+INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+"""]
+
+# The same stop words and suffix rules as `words()` in public/router.js, so search and routing agree on a term.
+STOPS = set(('the a an to on for at in my me this that from with it is was are be yesterday please work thread status latest then what where did we leave can you should run set change show find update policy project session 계속 오늘 어제 어디까지 상태 확인 현재 부탁 좀 해줘 알려줘 진행해 작업').split())
+PARTICLE = re.compile(r'^(.{2,}?)(에서|에게|으로|에는|에서의|의|에|을|를|는|은|이|가|로|까지)$')
+
+
+def terms(text):
+    raw=re.findall(r'[^\W_]+',unicodedata.normalize('NFKC',str(text or '').lower()))
+    out=[]
+    for w in raw:
+        w=re.sub(r'^([a-z]{3,})s$',r'\1',re.sub(r'^([a-z]{3,})ies$',r'\1y',PARTICLE.sub(r'\1',w)))
+        if len(w)>1 and w not in STOPS and w not in out:out.append(w)
+    return out
+
 
 class Store:
     def __init__(self, path):
         self.path = path
         self.local = threading.local()
         self.db.executescript(SCHEMA)
+        self.migrate()
         self.db.execute("INSERT OR IGNORE INTO prefs VALUES('baseline',?)",(str(time.time()),))
         self.baseline = float(self.pref("baseline"))
 
@@ -68,6 +96,15 @@ class Store:
             db.execute("PRAGMA foreign_keys=ON")
             self.local.db=db
         return self.local.db
+
+    def migrate(self):
+        with self.tx():
+            version=self.db.execute("PRAGMA user_version").fetchone()[0]
+            statement=''
+            for line in ''.join(MIGRATIONS[version:]).splitlines(keepends=True):
+                statement+=line
+                if sqlite3.complete_statement(statement):self.db.execute(statement);statement=''
+            self.db.execute(f"PRAGMA user_version={len(MIGRATIONS)}")
 
     @contextmanager
     def tx(self):
@@ -216,11 +253,35 @@ class Store:
                 ids.insert(ids.index(before) if before in ids else len(ids),key)
                 self.db.executemany("UPDATE sessions SET group_id=?,position=? WHERE id=?",[(group,n,i) for n,i in enumerate(ids)])
 
-    def history(self,key):
+    def history(self,key,seq=None):
+        """The latest 200 messages, or the 200 around `seq` when the thread is opened at an older message."""
         self.session_row(key)
-        return [dict(r) for r in self.db.execute("""SELECT role,body,at FROM
-          (SELECT role,body,at,seq FROM messages WHERE session=? ORDER BY at DESC,seq DESC LIMIT 200)
-          ORDER BY at,seq""",(key,))]
+        target=seq is not None and self.db.execute("SELECT at,seq FROM messages WHERE session=? AND seq=?",(key,seq)).fetchone()
+        if not target:
+            return [dict(r) for r in self.db.execute("""SELECT seq,role,body,at FROM
+              (SELECT role,body,at,seq FROM messages WHERE session=? ORDER BY at DESC,seq DESC LIMIT 200)
+              ORDER BY at,seq""",(key,))]
+        at,seq=target
+        return [dict(r) for r in self.db.execute("""SELECT seq,role,body,at FROM
+          (SELECT * FROM (SELECT role,body,at,seq FROM messages WHERE session=? AND (at<? OR at=? AND seq<=?) ORDER BY at DESC,seq DESC LIMIT 100)
+           UNION ALL SELECT * FROM (SELECT role,body,at,seq FROM messages WHERE session=? AND (at>? OR at=? AND seq>?) ORDER BY at,seq LIMIT 100))
+          ORDER BY at,seq""",(key,at,at,seq,key,at,at,seq))]
+
+    def search(self,text,provider=None,limit=20):
+        """Visible sessions ranked by their best-matching message, each with that message's excerpt."""
+        words=terms(text)
+        if not words:return []
+        query=' OR '.join('"'+w+'"*' for w in words)
+        # Bare columns come from the row holding min(rank), the best match in each session. Hidden sessions are
+        # dropped after grouping, and excerpts are cut only for the messages returned, which keeps large histories fast.
+        best=[dict(r) for r in self.db.execute("""SELECT b.session,b.seq,b.role,b.at FROM
+          (SELECT m.session,m.seq,m.role,m.at,min(messages_fts.rank) score FROM messages_fts JOIN messages m ON m.seq=messages_fts.rowid
+           WHERE messages_fts MATCH ? GROUP BY m.session) b
+          JOIN sessions s ON s.id=b.session WHERE s.hidden=0 AND (? IS NULL OR s.provider=?) ORDER BY b.score LIMIT ?""",(query,provider,provider,limit))]
+        excerpts=dict(self.db.execute(f"""SELECT rowid,snippet(messages_fts,0,'','','…',32) FROM messages_fts
+          WHERE messages_fts MATCH ? AND rowid IN ({','.join('?'*len(best))})""",(query,*[b['seq'] for b in best])))
+        for b in best:b['snippet']=excerpts[b['seq']]
+        return best
 
     def alerts_after(self,after):
         limit=100
