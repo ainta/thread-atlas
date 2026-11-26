@@ -32,7 +32,8 @@ export function route(text,items,focus,mode='auto',locked=false,found=[]){
     for(const [q,weight] of weights){
       const place=d.title.has(q)?3:d.body.has(q)?1.5:d.history.has(q)?1:d.group.has(q)?0.65:0;
       score+=weight*place;
-      if(place){hits++;titled=titled||place===3;}
+      // Words found only in an older message can find a thread, but sending to it unasked needs more than that.
+      if(place&&place!==1){hits++;titled=titled||place===3;}
     }
     return {i:d.i,score,strong:titled||hits>1};
   }).sort((a,b)=>b.score-a.score);
