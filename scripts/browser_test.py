@@ -2,12 +2,14 @@
 import io
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, expect
@@ -32,6 +34,32 @@ document.querySelector('button').onclick=()=>{
  setTimeout(()=>bubble('assistant','MARKER reply from the original '+provider+' fixture.'),250);
 };
 </script>"""
+
+
+def full_history_lookup(page,origin):
+    """A lookup finds a thread by an older message, shows it with its time, and View source opens the history there."""
+    # The live fixture titled 'Payment retry policy' would match by title. Hiding it leaves only the older message to match.
+    titled=next(i for i in page.request.get(origin+'/api/state').json()['sessions'] if i['title']=='Payment retry policy')
+    assert page.request.post(origin+'/api/edit',data={'id':titled['id'],'hidden':True}).ok
+    older='Agreed payment retry policy: retry failed charges three times with exponential backoff.'
+    thread=[{'uuid':'billing-0','sender':'human','text':older,'created_at':'2025-03-14T12:00:00Z'}]+[
+        {'uuid':'billing-'+str(n),'sender':'assistant' if n%2 else 'human','text':'CSV export step '+str(n)+' is done.',
+         'created_at':'2025-03-15T00:%02d:00Z'%n} for n in range(1,41)]
+    decoy=[{'uuid':'invoice-1','sender':'assistant','text':'The payment button is now green.','created_at':'2025-03-16T00:00:00Z'}]
+    assert page.request.post(origin+'/api/import',data={'provider':'Claude','account':'History','data':[
+        {'uuid':'billing-sync','name':'Billing sync notes','chat_messages':thread},
+        {'uuid':'invoice-layout','name':'Invoice layout','chat_messages':decoy}]}).ok
+    seq=page.request.get(origin+'/api/search?q=payment retry policy').json()[0]['seq']
+    page.locator('[data-view=map]').click();expect(page.locator('.card').filter(has_text='Billing sync notes')).to_have_count(1,timeout=10000)
+    page.locator('#prompt').fill('Where did we leave the payment retry policy?');page.locator('#prompt').press('Enter')
+    answer=page.locator('#chat .answer').last
+    expect(answer).to_contain_text('Billing sync notes');expect(answer).to_contain_text(older)
+    when=datetime.fromtimestamp(datetime.fromisoformat('2025-03-14T12:00:00+00:00').timestamp())
+    expect(answer).to_contain_text(re.compile(rf'{when:%b} {when.day}, {when.hour%12 or 12}:{when:%M}\s?{when:%p}'))
+    answer.locator('[data-seq="%d"]'%seq).click()
+    match=page.locator('#dialog .history section.match')
+    expect(match).to_have_attribute('data-seq',str(seq));expect(match).to_contain_text(older);expect(match).to_be_in_viewport()
+    page.locator('#closeDialog').click()
 
 
 def main():
@@ -136,8 +164,9 @@ def main():
             page.goto(old_url);expect(page.locator('#dialogContent')).to_contain_text(notification['body'])
             assert page.request.post(origin+'/api/edit',data={'id':notification['session'],'hidden':True}).ok
             page.reload();expect(page.locator('h1')).to_have_text('Inbox');expect(page.locator('#dialog')).not_to_be_visible()
+            full_history_lookup(page,origin)
             assert not errors,errors
-            ctx.close();print('PASS: both extension DOM round trips, badge receipts, read-only ZIP import, lookup, routing, drag, hide/restore, reload, language switch, authorization, 4 widths, and a 103-session map.')
+            ctx.close();print('PASS: both extension DOM round trips, badge receipts, read-only ZIP import, lookup, routing, drag, hide/restore, reload, language switch, authorization, 4 widths, a 103-session map, and a full-history lookup.')
         finally:proc.terminate();proc.wait(timeout=20)
 
 
