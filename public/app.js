@@ -5,7 +5,7 @@ const load=(key,def)=>{try{return JSON.parse(localStorage.getItem('atlas:'+key))
 const save=(key,obj)=>localStorage.setItem('atlas:'+key,JSON.stringify(obj));
 let lang=load('lang','en'),view='map',filter=null,focus=load('target',null),locked=load('locked',false);
 let folded=new Set(load('folded',[])),messages=load('chat',[]),state={sessions:[],groups:[],inbox:[],deliveries:[]};
-let received=0,ready=false,polling=false,lastPaint='',timer,draftID=load('draftID',null);
+let received=null,ready=false,polling=false,requestSeq=0,appliedSeq=0,dragging=false,lastPaint='',timer,draftID=load('draftID',null);
 const l=(en,ko)=>lang==='ko'?ko:en;
 const labels={map:['Work map','작업 지도'],inbox:['Inbox','받은 답변'],hidden:['Hidden','숨김'],projects:['Projects','프로젝트'],connections:['Connections','연결 범위'],newGroup:['New project','새 프로젝트'],workspace:['Workspace','워크스페이스'],myWork:['My work','내 작업'],mainChat:['Main chat','메인 대화'],message:['Message','메시지'],send:['Send','보내기'],close:['Close','닫기']};
 const text=key=>l(...labels[key]);
@@ -15,7 +15,7 @@ const project=id=>state.groups.find(g=>g.id===id)?.name||l('Unsorted','미분류
 const path=i=>project(i.group_id)+' › '+name(i);
 const stamp=n=>n?new Date(n*1000).toLocaleString(lang==='ko'?'ko-KR':'en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'—';
 const active=()=>state.sessions.filter(i=>!i.hidden);
-const status=i=>i.state==='run'?l('Running','실행 중'):i.state==='wait'?l('Needs reply','답변 대기'):i.direct?l('Connected','연결됨'):l('Read-only','읽기 전용');
+const status=i=>i.owned_terminal?l('Open in terminal','다른 터미널에서 실행 중'):i.state==='run'?l('Running','실행 중'):i.state==='wait'?l('Needs reply','답변 대기'):i.direct?l('Connected','연결됨'):l('Read-only','읽기 전용');
 function toast(msg){$('toast').textContent=msg;clearTimeout(timer);timer=setTimeout(()=>$('toast').textContent='',4200);}
 async function api(action,data){
  const res=await fetch('/api/'+action,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
@@ -86,11 +86,20 @@ function renderChat(){
 async function refresh(force=false){
  if(polling&&!force)return;polling=true;
  try{
-  const s=await api('state');for(const i of s.sessions){i.project=s.groups.find(g=>g.id===i.group_id)?.name||'';if(i.state==='idle'&&i.latest.trim().endsWith('?'))i.state='wait';}
-  const seq=Math.max(0,...s.inbox.map(m=>m.seq));if(ready&&seq>received){const m=s.inbox.find(x=>x.seq>received&&x.unread);if(m){const i=s.sessions.find(x=>x.id===m.session);if(i){toast(l('New reply · ','새 답변 · ')+name(i));if(messages.some(v=>v.kind==='delivery'&&v.session===i.id))push({kind:'source',session:i.id,path:i.project+' › '+name(i),provider:i.provider,at:m.at,body:m.body.slice(0,2400)});}}}
-  received=Math.max(received,seq);ready=true;state=s;
+  const req=++requestSeq,after=received;const s=await api('state'+(after===null?'':'?after='+after));
+  if(req<appliedSeq)return;appliedSeq=req;
+  for(const i of s.sessions){i.project=s.groups.find(g=>g.id===i.group_id)?.name||'';if(i.state==='idle'&&i.latest.trim().endsWith('?'))i.state='wait';}
+  for(const m of s.events||[]){
+   if(received!==null&&m.seq<=received)continue;
+   const i=s.sessions.find(x=>x.id===m.session);
+   if(i){toast(l('New reply · ','새 답변 · ')+name(i));if(messages.some(v=>v.kind==='delivery'&&v.session===i.id)&&!messages.some(v=>v.event===m.seq))
+    push({kind:'source',event:m.seq,session:i.id,path:i.project+' › '+name(i),provider:i.provider,at:m.at,body:m.body});}
+  }
+  received=s.cursor;ready=true;state=s;
   if(focus&&(!item(focus)||item(focus).hidden)){focus=null;locked=false;}
-  const signature=JSON.stringify(s);if(force||signature!==lastPaint){lastPaint=signature;redraw();}
+  const signature=JSON.stringify([s.scan,s.codex,s.claude,s.groups,s.inbox,s.deliveries,s.sessions.map(({live_at,synced_at,...i})=>i)]);
+  if(!dragging&&(force||signature!==lastPaint)){lastPaint=signature;redraw();}
+
  }catch(e){$('statusline').textContent=l('Disconnected · ','연결 끊김 · ')+e.message;}finally{polling=false;}
 }
 async function detail(id){
@@ -109,7 +118,7 @@ $('composer').onsubmit=async e=>{
  e.preventDefault();const body=$('prompt').value.trim();if(!body)return;const p=plan();
  const key=draftID||crypto.randomUUID();draftID=key;save('draftID',key);
  const submit=$('composer').querySelector('[type=submit]');if(submit.disabled)return;submit.disabled=true;
- try{push({kind:'user',body});
+ try{if(!messages.some(m=>m.kind==='user'&&m.key===key))push({kind:'user',body,key});
   if(!p.candidates.length)push({kind:'info',body:l('No matching visible session.','일치하는 세션이 없습니다.')});
   else if(p.candidates.length===1&&!p.waiting)await handle(p.candidates[0],body,p.action,key);
   else push({kind:'choose',ids:p.candidates.map(i=>i.id),body,action:p.action,key});
@@ -152,12 +161,12 @@ document.addEventListener('click',async e=>{
 });
 $('mode').onchange=preview;$('prompt').oninput=()=>{draftID=null;save('draftID',null);save('draft',$('prompt').value);preview();};
 $('prompt').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229){e.preventDefault();$('composer').requestSubmit();}};
-document.addEventListener('dragstart',e=>{const c=e.target.closest('[data-card]');if(c){e.dataTransfer.setData('application/x-thread-atlas',c.dataset.card);e.dataTransfer.effectAllowed='move';}});
+document.addEventListener('dragstart',e=>{const c=e.target.closest('[data-card]');if(c){dragging=true;e.dataTransfer.setData('application/x-thread-atlas',c.dataset.card);e.dataTransfer.effectAllowed='move';}});
 const zone=e=>e.target.closest('#hiddenDrop,#composer,[data-group]');
 const clean=()=>document.querySelectorAll('.dropping').forEach(x=>x.classList.remove('dropping'));
 document.addEventListener('dragover',e=>{const z=zone(e);if(z&&e.dataTransfer.types.includes('application/x-thread-atlas')){e.preventDefault();clean();z.classList.add('dropping');}});
-document.addEventListener('dragend',clean);
-document.addEventListener('drop',async e=>{const z=zone(e),id=e.dataTransfer.getData('application/x-thread-atlas');clean();if(!z||!item(id))return;e.preventDefault();
+document.addEventListener('dragend',()=>{dragging=false;clean();});
+document.addEventListener('drop',async e=>{const z=zone(e),id=e.dataTransfer.getData('application/x-thread-atlas');dragging=false;clean();if(!z||!item(id))return;e.preventDefault();
  try{if(z.id==='hiddenDrop')await edit(id,{hidden:true});else if(z.id==='composer'){pin(id,true);$('mode').value='send';preview();$('prompt').focus();}else await edit(id,{group:z.dataset.group,before:e.target.closest('[data-card]')?.dataset.card});}catch(err){toast(err.message);}
 });
 $('prompt').value=load('draft','');applyLanguage();await refresh(true);setInterval(()=>refresh(),2000);

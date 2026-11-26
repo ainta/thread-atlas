@@ -19,13 +19,16 @@ $('connect').onclick=async()=>{
   const pairing=$('key').value.trim(),account=$('account').value.trim();
   if(!/^\d{1,5}:[\w-]{30,}$/.test(pairing)||!account)throw Error(ko()?'연결 키와 계정을 확인하세요.':'Check the pairing key and account label.');
   await chrome.storage.local.set({pairing,account});
-  await chrome.storage.session.set({['tab'+tab.id]:{...data,account,pairing,allowed:$('write').checked,tab:crypto.randomUUID()}});
+  const bindingKey='tab'+tab.id,previous=(await chrome.storage.session.get(bindingKey))[bindingKey];
+  if(previous&&previous.account!==account)await chrome.tabs.sendMessage(tab.id,{type:'deactivate'}).catch(()=>{});
+  const same=previous?.instance===data.instance&&previous.account===account&&previous.source===data.source;
+  await chrome.storage.session.set({[bindingKey]:{...data,account,pairing,allowed:$('write').checked,tab:same?previous.tab:crypto.randomUUID()}});
   const reply=await chrome.tabs.sendMessage(tab.id,{type:'activate'});
   if(reply?.error)throw Error(reply.error);
   $('status').textContent=ko()?'이 대화에 연결했습니다.':'Connected to this conversation.';
  }catch(e){$('status').textContent=e.message;}
 };
-$('disconnect').onclick=async()=>{await chrome.storage.session.remove('tab'+tab.id);await chrome.tabs.sendMessage(tab.id,{type:'deactivate'}).catch(()=>{});$('status').textContent=ko()?'연결 해제됨':'Disconnected';};
+$('disconnect').onclick=async()=>{await chrome.tabs.sendMessage(tab.id,{type:'deactivate'}).catch(()=>{});await chrome.storage.session.remove('tab'+tab.id);$('status').textContent=ko()?'연결 해제됨':'Disconnected';};
 start();
 
 $('all').onclick=async()=>{
@@ -33,7 +36,7 @@ $('all').onclick=async()=>{
   const pairing=$('key').value.trim(),account=$('account').value.trim();
   if(!/^\d{1,5}:[\w-]{30,}$/.test(pairing)||!account)throw Error(ko()?'연결 키와 계정을 확인하세요.':'Check the pairing key and account label.');
   await chrome.storage.local.set({pairing,account});
-  const tabs=await chrome.tabs.query({url:['https://chatgpt.com/c/*','https://claude.ai/chat/*']});
+  const tabs=await chrome.tabs.query({url:['https://chatgpt.com/c/*','https://chatgpt.com/g/*/c/*','https://claude.ai/chat/*']});
   let count=0;
   for(const tab of tabs){
    try{

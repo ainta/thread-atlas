@@ -25,3 +25,7 @@ const duplicates=[0,1].map(id=>({id,title:'Refund policy',latest:'Update the lim
 assert.equal(route('Update refund policy',duplicates,null).candidates.length,2);
 assert.equal(route('Where did we leave the refund policy?',duplicates,null).action,false);
 assert.equal(route('Go ahead',duplicates,0,'send',true).candidates[0].id,0);
+const tests=[{id:'origin',title:'Login bug',latest:'Fixed.',project:'Auth'},
+ {id:'other',title:'Regression tests',latest:'Run the tests.',project:'Other'}];
+assert.equal(route('Then run the tests',tests,'origin').candidates[0].id,'origin');
+assert.equal(route('Update regression tests',tests,'origin').candidates[0].id,'other');

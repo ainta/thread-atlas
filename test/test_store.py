@@ -52,6 +52,44 @@ class StoreTests(unittest.TestCase):
         scan_file(self.store,p,'Claude Code');scan_file(self.store,p,'Claude Code')
         self.assertEqual(len(self.store.history(s['id'])),2)
 
+    def test_web_export_alignment_preserves_repeats(self):
+        service=Service(self.root/'bridge',self.root,self.root,12345);self.addCleanup(service.lock.close)
+        payload={'provider':'Claude','account':'Work','tab':'tab-binding-123456','source':'web1','initial':True,
+                 'messages':[{'id':'dom-a','role':'user','text':'Again'},{'id':'dom-b','role':'user','text':'Again'}]}
+        sid=service.web_sync(payload)['session']
+        export={'uuid':'web1','name':'Demo','chat_messages':[{'uuid':'real-a','sender':'human','text':'Again'},
+                {'uuid':'real-b','sender':'human','text':'Again'},{'uuid':'real-c','sender':'assistant','text':'Complete'}]}
+        import_export(service.store,'Claude','Work',[export])
+        import_export(service.store,'Claude','Work',[export])
+        service.web_sync({**payload,'messages':payload['messages']+[{'id':'dom-c','role':'assistant','text':'Complete'}]})
+        self.assertEqual([m['body'] for m in service.store.history(sid)].count('Again'),2)
+        self.assertEqual(len(service.store.history(sid)),3)
+
+    def test_batched_alerts_include_each_visible_reply_once(self):
+        sid=self.store.session('Claude','Personal','one','Work')
+        other=self.store.session('ChatGPT','Work','two','Work')
+        self.store.edit(other,{'hidden':True})
+        _,cursor=self.store.alerts_after(None)
+        for n in range(105):
+            self.store.message(sid,str(n),'assistant','Reply '+str(n),time.time())
+        self.store.message(other,'hidden','assistant','Hidden reply',time.time())
+        page1,cursor=self.store.alerts_after(cursor)
+        page2,cursor=self.store.alerts_after(cursor)
+        self.assertEqual([len(page1),len(page2)],[100,5])
+        self.assertEqual(len({m['seq'] for m in page1+page2}),105)
+        self.assertEqual(self.store.alerts_after(cursor)[0],[])
+
+    def test_restart_quarantines_an_inflight_send(self):
+        service=Service(self.root/'service',self.root,self.root,12345)
+        sid=service.store.session('Claude Code','local','one','Work')
+        service.claude_ok=True
+        draft={'id':'restart-draft-0001','session':sid,'body':'Continue'}
+        service.enqueue(draft);service.update(draft['id'],'sending');service.lock.close()
+        restarted=Service(self.root/'service',self.root,self.root,12345)
+        self.addCleanup(restarted.lock.close)
+        self.assertEqual(restarted.enqueue(draft)['status'],'uncertain')
+        self.assertEqual(len(restarted.snapshot()['deliveries']),1)
+
     def test_web_claim_idempotency_and_read_only(self):
         service=Service(self.root/'s',self.root,self.root,12345);self.addCleanup(service.lock.close)
         payload={'provider':'Claude','account':'Personal','source':'test-one','tab':'test-tab-abcdefghijkl',

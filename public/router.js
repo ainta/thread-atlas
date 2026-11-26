@@ -15,6 +15,8 @@ export function route(text,items,focus,mode='auto',locked=false){
   const selected=pool.find(i=>i.id===focus);
   if(locked&&selected&&action)return {action,candidates:[selected]};
   const query=words(text);
+  const generic=new Set('then test regression first again next 하나 다시 테스트 회귀 먼저'.split(' '));
+  if(selected&&/^(?:then\b|그럼|그러면)/i.test(text.trim())&&query.every(q=>generic.has(q)))return {action,candidates:[selected]};
   const docs=pool.map(i=>({i,title:new Set(words(i.title)),body:new Set(words(i.latest)),group:new Set(words(i.project))}));
   const scores=docs.map(d=>{
     let score=0;

@@ -38,7 +38,7 @@ class Service:
         self.bridge=self.store.pref('bridge') or secrets.token_urlsafe(32)
         self.store.db.execute("INSERT OR IGNORE INTO prefs VALUES('bridge',?)",(self.bridge,))
         self.data=data;self.tasks=set();self.workers={};self.notifications=notifications
-        self.scan_status='Indexing';self.codex_ok=False;self.claude_ok=False;self.last_scan=0
+        self.scan_status='Indexing';self.codex_ok=False;self.claude_ok=False;self.last_scan=0;self.owned_terminals=set()
         self.notification_seq=self.store.db.execute("SELECT COALESCE(max(seq),0) FROM messages").fetchone()[0]
 
     def spawn(self,coro):
@@ -79,14 +79,23 @@ class Service:
             except Exception:self.codex_ok=False
             try:
                 auth=json.loads(await output('claude','auth','status',timeout=10))
+                agents=json.loads(await output('claude','agents','--json',timeout=15))
+                if not isinstance(agents,list):raise ValueError('Unsupported agent inventory')
+                self.owned_terminals={a.get('sessionId') for a in agents}
                 self.claude_ok=bool(auth.get('loggedIn'))
             except Exception:self.claude_ok=False
             await asyncio.sleep(45)
 
-    def snapshot(self):
+    def snapshot(self, after=None):
         state=self.store.state()
+        locked=set()
+        if self.owned_terminals:
+            locked={r['id'] for r in self.store.db.execute("SELECT id,source FROM sessions WHERE provider='Claude Code'")
+                    if r['source'] in self.owned_terminals}
         for i in state['sessions']:
-            i['direct']={'Codex':self.codex_ok,'Claude Code':self.claude_ok}.get(i['provider'],bool(i['web_live'] and i['writable']))
+            i['owned_terminal']=i['id'] in locked
+            i['direct']=not i['owned_terminal'] and {'Codex':self.codex_ok,'Claude Code':self.claude_ok}.get(i['provider'],bool(i['web_live'] and i['writable']))
+        state['events'],state['cursor']=self.store.alerts_after(after)
         state.update(scan=self.scan_status,lastScan=self.last_scan,codex=self.codex_ok,claude=self.claude_ok,
                      notifications=self.store.pref('notifications','1' if self.notifications else '0')=='1')
         return state
@@ -165,19 +174,20 @@ class Service:
         if provider not in WEB_PROVIDERS or not isinstance(account,str) or not 0<len(account.strip())<=120:raise ValueError('Invalid web account')
         if not isinstance(source,str) or not re.fullmatch(r'[\w-]{1,160}',source) or not isinstance(tab,str) or not re.fullmatch(r'[\w-]{12,100}',tab):raise ValueError('Invalid web thread')
         account=account.strip();url=('https://chatgpt.com/c/' if provider=='ChatGPT' else 'https://claude.ai/chat/')+source
+        path=d.get('pathname','')
+        if provider=='ChatGPT' and re.fullmatch(r'/g/[\w-]+/c/'+re.escape(source),path):
+            url='https://chatgpt.com'+path
         with self.store.tx():
             sid=self.store.session(provider,account,source,provider+' · '+account,str(d.get('title') or '')[:180],url=url)
             s=self.store.session_row(sid)
             if s['bridge'] and s['bridge']!=tab and time.time()-s['live_at']<35:raise ValueError('Thread already connected in another tab')
             self.store.db.execute("UPDATE sessions SET live_at=?,bridge=?,writable=?,state=? WHERE id=?",(time.time(),tab,int(bool(d.get('writable'))),'run' if d.get('busy') else 'idle',sid))
+            matched=set()
             for m in d.get('messages',[])[:160]:
                 body=m.get('text');role=m.get('role');mid=m.get('id')
                 if not isinstance(body,str) or role not in ('user','assistant') or not isinstance(mid,str):continue
-                # The page's stable message ID is preferred. Match imported text for first observation only.
-                if d.get('initial') and self.store.db.execute("SELECT 1 FROM messages WHERE session=? AND role=? AND body=?",(sid,role,body.strip())).fetchone():
-                    self.store.db.execute("INSERT OR IGNORE INTO prefs VALUES(?,?)",('web-seen:'+ident(sid,mid),'1'))
-                if not self.store.pref('web-seen:'+ident(sid,mid)):
-                    self.store.message(sid,mid,role,body,epoch(m.get('at')) or time.time(),not d.get('initial'))
+                self.store.merge_message(sid,mid,role,body,epoch(m.get('at')) or time.time(),
+                                         bool(d.get('initial')),matched,not d.get('initial'))
             job=None
             if not d.get('busy') and d.get('writable') and not s['hidden'] and not self.store.db.execute("SELECT 1 FROM deliveries WHERE session=? AND status IN ('claimed','delivered') AND tab!=''",(sid,)).fetchone():
                 row=self.store.db.execute("SELECT id,body FROM deliveries WHERE session=? AND tab=? AND status='queued' ORDER BY created LIMIT 1",(sid,tab)).fetchone()
@@ -219,7 +229,7 @@ def application(s):
     async def api(req):
         action=req.match_info['action']
         if req.method=='GET':
-            if action=='state':value=s.snapshot()
+            if action=='state':value=s.snapshot(int(req.query['after']) if 'after' in req.query else None)
             elif action=='history':value=s.store.history(req.query['id'])
             elif action=='pairing':value={'token':s.bridge,'port':s.port}
             else:raise web.HTTPNotFound()
@@ -255,6 +265,10 @@ def application(s):
         return web.json_response({'count':count})
     async def bridge(req):
         d=await req.json()
+        if req.path=='/bridge/disconnect':
+            with s.store.tx():
+                s.store.db.execute("UPDATE sessions SET bridge='',live_at=0,writable=0 WHERE bridge=? AND source=?",(d.get('tab'),d.get('source')))
+            return web.json_response({'ok':True})
         return web.json_response(s.web_sync(d) if req.path=='/bridge/sync' else s.ack(d))
     async def asset(req):
         name=req.match_info.get('asset') or 'index.html'
@@ -268,7 +282,7 @@ def application(s):
         await asyncio.gather(*tasks,return_exceptions=True)
     app.on_startup.append(start);app.on_cleanup.append(stop)
     app.router.add_route('*','/api/{action}',api)
-    app.router.add_post('/import',upload);app.router.add_post('/bridge/sync',bridge);app.router.add_post('/bridge/ack',bridge)
+    app.router.add_post('/import',upload);app.router.add_post('/bridge/sync',bridge);app.router.add_post('/bridge/ack',bridge);app.router.add_post('/bridge/disconnect',bridge)
     app.router.add_get('/launch/{key}',asset);app.router.add_get('/',asset);app.router.add_get('/{asset}',asset)
     return app
 

@@ -122,7 +122,9 @@ def import_export(store,provider,account,data):
                 msgs=[(m.get('uuid'),{'human':'user','assistant':'assistant'}.get(m.get('sender')),m.get('text') or plain(m.get('content')),epoch(m.get('created_at'))) for m in batch]
                 url='https://claude.ai/chat/'+uid
             sid=store.session(provider,account.strip(),uid,provider+' · '+account.strip(),c.get('title') or c.get('name') or '',url=url)
-            for source,role,body,at in msgs:store.message(sid,source or ident(role,body,at),role,body,at,False)
+            matched=set()
+            for n,(source,role,body,at) in enumerate(msgs):
+                store.merge_message(sid,source or ident(n,role,body,at),role,body,at,True,matched,False)
             count+=1
     if not count:raise ValueError('No compatible conversations found')
     return count

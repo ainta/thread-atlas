@@ -12,6 +12,6 @@ These fixtures demonstrate the bridge and dashboard workflow. They do not establ
 
 ## Store and routing checks
 
-The storage suite covers export deduplication and selected branches, account isolation, preservation of grouping and visibility, partial JSONL writes, unread states, and tab-claim idempotency. The routing suite uses 20 synthetic topics with overlapping vocabulary, 50 English and 50 Korean requests, and ten ambiguous requests per language. On this dataset all 100 topic-bearing requests selected the correct thread and all 20 ambiguous requests prompted for a choice. This is a regression fixture, not a real-world routing accuracy estimate.
+Seven storage and delivery regression tests cover paginated alerts, restart recovery, repeated utterances across different export and DOM identifiers, and export deduplication and selected branches, account isolation, preservation of grouping and visibility, partial JSONL writes, unread states, and tab-claim idempotency. The routing suite uses 20 synthetic topics with overlapping vocabulary, 50 English and 50 Korean requests, and ten ambiguous requests per language. On this dataset all 100 topic-bearing requests selected the correct thread and all 20 ambiguous requests prompted for a choice. This is a regression fixture, not a real-world routing accuracy estimate.
 
 Run the commands in the [README](../README.md) to reproduce the checks.

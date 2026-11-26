@@ -30,6 +30,9 @@ final class MenuApp: NSObject, NSApplicationDelegate {
         let proc = Process()
         proc.executableURL = resources.appendingPathComponent("Start.command")
         proc.arguments = ["--no-open", "--notify"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["ATLAS_RUNTIME"] = data.appendingPathComponent("runtime", isDirectory: true).path
+        proc.environment = environment
         proc.currentDirectoryURL = resources
         do {
             try proc.run()

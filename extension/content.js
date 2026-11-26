@@ -1,9 +1,10 @@
 // The user connects one URL and one document instance; navigation invalidates the binding.
 const instance=crypto.randomUUID();
 let connected=false,observedSource='',initial=true,working=false,pending=null,lastSignature='',stableAt=0;
+const observed=new Map();
 function identity(){
- const route=location.pathname.match(location.hostname==='chatgpt.com'?/^\/c\/([\w-]+)\/?$/:/^\/chat\/([\w-]+)\/?$/);
- return {provider:location.hostname==='chatgpt.com'?'ChatGPT':'Claude',source:route?.[1],instance};
+ const route=location.pathname.match(location.hostname==='chatgpt.com'?/^\/(?:g\/[\w-]+\/)?c\/([\w-]+)\/?$/:/^\/chat\/([\w-]+)\/?$/);
+ return {provider:location.hostname==='chatgpt.com'?'ChatGPT':'Claude',source:route?.[1],pathname:location.pathname.replace(/\/$/,''),instance};
 }
 function editor(){return document.querySelector('#prompt-textarea,textarea[data-testid="chat-input"],[contenteditable="true"].ProseMirror,[contenteditable="true"][role="textbox"],textarea[placeholder]');}
 function visible(el){return Boolean(el&&el.getClientRects().length&&!el.disabled&&el.getAttribute('aria-disabled')!=='true');}
@@ -52,9 +53,11 @@ async function pulse(){
   let records=all;
   if(!stable&&all.at(-1)?.role==='assistant')records=all.slice(0,-1);
   if(initial&&!stable&&!running)return;
-  const result=await host('sync',{title:document.title.replace(/\s*[-|–]\s*(ChatGPT|Claude).*$/i,''),messages:records,initial,busy:running||!!pending,writable:visible(editor())});
+  const changed=records.filter(m=>observed.get(m.id)!==hash(m.text));
+  const result=await host('sync',{title:document.title.replace(/\s*[-|–]\s*(ChatGPT|Claude).*$/i,''),messages:changed,initial,busy:running||!!pending,writable:visible(editor())});
   if(result?.error)throw Error(result.error);
   if(!result?.attached){connected=false;return;}
+  for(const m of changed)observed.set(m.id,hash(m.text));
   initial=false;
   if(pending){
    const user=all.find(m=>m.role==='user'&&!pending.before.includes(m.id)&&m.text.trim()===pending.body.trim());
@@ -68,8 +71,8 @@ async function pulse(){
 }
 chrome.runtime.onMessage.addListener((m,sender,reply)=>{
  if(m.type==='identity'){reply(identity());return;}
- if(m.type==='deactivate'){connected=false;pending=null;reply({});return;}
- if(m.type==='activate'){connected=true;observedSource=identity().source;initial=true;lastSignature=bubbles().map(m=>m.id+':'+hash(m.text)).join('|');stableAt=0;}
+ if(m.type==='deactivate'){connected=false;pending=null;host('disconnect',{}).then(()=>reply({}),e=>reply({error:e.message}));return true;}
+ if(m.type==='activate'){observed.clear();connected=true;observedSource=identity().source;initial=true;lastSignature=bubbles().map(m=>m.id+':'+hash(m.text)).join('|');stableAt=0;}
  if(m.type==='activate'||m.type==='pulse'){pulse().then(()=>reply({}),e=>reply({error:e.message}));return true;}
 });
 setInterval(()=>{if(connected)pulse().catch(()=>{});},1800);

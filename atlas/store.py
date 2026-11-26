@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS sessions(
 CREATE TABLE IF NOT EXISTS messages(
  seq INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT REFERENCES sessions(id),source_id TEXT,
  role TEXT,body TEXT,at REAL,alert INTEGER, UNIQUE(session,source_id));
+CREATE TABLE IF NOT EXISTS aliases(session TEXT,alias TEXT,seq INTEGER REFERENCES messages(seq),PRIMARY KEY(session,alias));
 CREATE INDEX IF NOT EXISTS message_thread ON messages(session,at);
+CREATE INDEX IF NOT EXISTS alias_target ON aliases(session,seq);
 CREATE INDEX IF NOT EXISTS alerts ON messages(alert,seq);
 CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY,inode INTEGER,offset INTEGER,meta TEXT);
 CREATE TABLE IF NOT EXISTS deliveries(
@@ -98,6 +100,28 @@ class Store:
             self.db.execute("UPDATE sessions SET latest=?, latest_at=? WHERE id=? AND latest_at<=?",
                             (body[:2200],at,sid,at))
 
+    def merge_message(self,sid,key,role,body,at,initial,matched,notify):
+        """Align matching export/DOM observations without collapsing repeated utterances."""
+        if role not in ('assistant','user') or not isinstance(body,str) or not body.strip():return
+        body=body.strip()[:200000]
+        alias=self.db.execute("SELECT a.seq,m.body,m.role,m.at FROM aliases a JOIN messages m ON m.seq=a.seq WHERE a.session=? AND a.alias=?",(sid,key)).fetchone()
+        if alias:
+            if not initial and alias['role']==role and alias['body']!=body:
+                self.db.execute("UPDATE messages SET body=? WHERE seq=?",(body,alias['seq']))
+                if role=='assistant':
+                    self.db.execute("UPDATE sessions SET latest=? WHERE id=? AND latest_at=?",(body[:2200],sid,alias['at']))
+            matched.add(alias[0]);return
+        row=self.db.execute("SELECT seq FROM messages WHERE session=? AND source_id=?",(sid,key)).fetchone()
+        if not row and initial:
+            rows=self.db.execute("SELECT seq FROM messages WHERE session=? AND role=? AND body=? ORDER BY at,seq",(sid,role,body))
+            row=next((r for r in rows if r[0] not in matched),None)
+        if not row:
+            self.message(sid,key,role,body,at,notify)
+            row=self.db.execute("SELECT seq FROM messages WHERE session=? AND source_id=?",(sid,key)).fetchone()
+        if row:
+            matched.add(row[0])
+            self.db.execute("INSERT OR IGNORE INTO aliases VALUES(?,?,?)",(sid,key,row[0]))
+
     def edit(self,key,change):
         with self.tx():
             self.session_row(key)
@@ -121,6 +145,15 @@ class Store:
         return [dict(r) for r in self.db.execute("""SELECT role,body,at FROM
           (SELECT role,body,at,seq FROM messages WHERE session=? ORDER BY at DESC,seq DESC LIMIT 200)
           ORDER BY at,seq""",(key,))]
+
+    def alerts_after(self,after):
+        limit=100
+        last=self.db.execute("SELECT COALESCE(max(seq),0) FROM messages").fetchone()[0]
+        if after is None:return [],last
+        rows=[dict(r) for r in self.db.execute("""SELECT m.seq,m.session,m.at,substr(m.body,1,2400) body
+          FROM messages m JOIN sessions s ON s.id=m.session WHERE m.seq>? AND m.seq<=? AND m.alert=1 AND s.hidden=0
+          ORDER BY m.seq LIMIT ?""",(after,last,limit))]
+        return rows,(rows[-1]['seq'] if len(rows)==limit else last)
 
     def state(self):
         now=time.time()
