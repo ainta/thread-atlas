@@ -42,3 +42,10 @@ assert.deepEqual([weak.candidates.length,weak.candidates[0].id,weak.confirm],[1,
 assert.equal(route('Book a dentist appointment',[mixed[0]],null).confirm,true);
 assert.equal(route('Update the payment retry budget',mixed,null).confirm,undefined);
 assert.equal(route('Where is the quarterly rotation?',crowd,null).confirm,undefined);
+// Two threads whose older messages match equally are offered as candidates, not sent to one of them.
+const older=[{id:'a',provider:'Codex',title:'Billing sync',latest:'Updated the CSV headers.',project:'Work'},
+ {id:'b',provider:'Codex',title:'Invoice export',latest:'Renamed the columns.',project:'Work'},
+ {id:'c',provider:'Codex',title:'Onboarding copy',latest:'Shortened the intro.',project:'Work'}];
+const found=['a','b'].map((session,seq)=>({session,seq,at:1,snippet:'Failed charges follow the payment retry budget: three attempts.'}));
+const tie=route('Change the payment retry budget to five attempts',older,null,'auto',false,found);
+assert.deepEqual([tie.action,tie.confirm,tie.candidates.map(i=>i.id).sort()],[true,undefined,['a','b']]);
