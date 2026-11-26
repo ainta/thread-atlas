@@ -1,0 +1,38 @@
+[
+  {
+    "provider": "Claude Code",
+    "source_id_sha256": "f57f1a335ffed3f7a6d90755791f9b6fdbfae3412ae79eb4b05eb401d0753e75",
+    "marker": "3F0A68BB3053",
+    "original_reply": "3F0A68BB3053",
+    "http_submissions": 2,
+    "original_followups": 1,
+    "receipt": "answered"
+  },
+  {
+    "provider": "Claude Code",
+    "source_id_sha256": "a289196703e2ef1b7eefbe65ed03be8da3c2c4096b4125f51c251b838ce95836",
+    "marker": "50FB14410A58",
+    "original_reply": "50FB14410A58",
+    "http_submissions": 2,
+    "original_followups": 1,
+    "receipt": "answered"
+  },
+  {
+    "provider": "Codex",
+    "source_id_sha256": "c034f2bf6d16c2be7138fc157af6007a3bfc53b9847d46e890320e62ab5480d6",
+    "marker": "1C7BF72BE272",
+    "original_reply": "1C7BF72BE272",
+    "http_submissions": 2,
+    "original_followups": 1,
+    "receipt": "answered"
+  },
+  {
+    "provider": "Codex",
+    "source_id_sha256": "4840bc4d43ea3eca48fca921a09deef0f7913be78861bcb19f86e2d74b667bc9",
+    "marker": "99F583173BEC",
+    "original_reply": "99F583173BEC",
+    "http_submissions": 2,
+    "original_followups": 1,
+    "receipt": "answered"
+  }
+]

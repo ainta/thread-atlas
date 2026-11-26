@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thread Atlas · Work map prototype</title>
+<style>
+:root{--ink:#262e2b;--muted:#5e6961;--line:#d9dfd6;--paper:#f9faf6;--accent:#a33d25;--tint:#fff4ec;--sage:#3d6655;--nav:#eeefe8}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.48 "Inter",-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;letter-spacing:-.025em}button,input,textarea{font:inherit;color:inherit}button{cursor:pointer;border:0;background:none}button:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{outline:3px solid #ae532c;outline-offset:3px}button:disabled{opacity:.5;cursor:default}.app{display:grid;grid-template-columns:196px minmax(430px,1fr) minmax(350px,30%);min-height:100dvh}.rail{background:var(--nav);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:27px 15px;gap:26px}.brand{display:flex;align-items:center;gap:11px;font-size:21px;font-weight:660;letter-spacing:-.065em}.mark{position:relative;display:inline-block;width:28px;height:28px;background:#af492e;border-radius:7px;flex:none}.mark:before{content:"";position:absolute;top:6px;bottom:6px;left:8px;width:9px;border:2px solid #fff6e6;border-width:0 0 2px 2px;border-radius:0 0 0 3px}.mark:after{content:"";position:absolute;width:9px;height:2px;left:9px;top:11px;background:#fff6e6;box-shadow:5px -2px 0 1px #fff6e6,5px 7px 0 1px #fff6e6}.navButton,.projectButton,.utilities button{display:flex;gap:10px;align-items:center;width:100%;text-align:left;border-radius:7px;padding:10px 11px;font-weight:550}.navButton.active,.projectButton.active{background:#dce3d9;color:#233e30}.navButton:hover,.projectButton:hover,.utilities button:hover{background:#e1e5dc}.navButton small,.projectButton small{margin-left:auto;font-size:12px;font-variant-numeric:tabular-nums;color:#58665a}.navicon{font-size:16px;width:18px;text-align:center}.sectionlabel{font-size:12px;color:var(--muted);margin:0 10px 8px;font-weight:620}.projects{border-top:1px solid #d2d8ce;padding-top:20px}.projectdot{width:9px;height:9px;background:var(--tone);border-radius:3px;flex:none}.utilities{margin-top:auto;color:var(--muted);font-size:13px}.sample{font-size:12px;margin:14px 10px 0;color:var(--muted)}
+main{padding:32px clamp(18px,2.6vw,47px) 24px;min-width:0}.breadcrumb{color:var(--muted);font-size:13px;margin:0 0 18px}.breadcrumb span{margin:0 7px;color:#9a9e94}h1,h2,h3,p{margin:0}h1{font-size:clamp(32px,3vw,46px);line-height:1.12;letter-spacing:-.08em}.intro{display:flex;justify-content:space-between;align-items:end;gap:10px;margin-bottom:20px}.meta{font-size:13px;color:var(--muted);margin-top:7px}.tool{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:6px;padding:6px 10px}.tool:hover,.linkbtn:hover{background:#edf0e9}.board{padding:16px 12px 16px;border:1px solid var(--line);border-radius:14px;background-color:#f3f5ef;background-image:radial-gradient(#cfd5c9 1px,transparent 1px);background-size:16px 16px}.group{--tone:#59816c;display:grid;grid-template-columns:clamp(95px,11vw,160px) 1fr;align-items:center;gap:19px;padding:8px 5px;position:relative}.group+.group{margin-top:10px}.root{display:flex;align-items:center;justify-content:space-between;gap:6px;border:1px solid #c6d0c4;border-left:4px solid var(--tone);padding:9px 10px;border-radius:6px;background:#fdfefb;font-size:14px;font-weight:680;z-index:1}.root small{font-size:11px;color:var(--muted)}.branch{padding-left:16px;display:grid;gap:8px;position:relative}.branch:before{content:"";border-top:1.5px solid #b0bead;width:20px;position:absolute;left:-19px;top:50%}.leaf{position:relative}.leaf:before{content:"";position:absolute;right:100%;width:16px;top:50%;border-top:1.5px solid #b0bead}.leaf:after{content:"";position:absolute;left:-16px;top:-4px;bottom:-4px;border-left:1.5px solid #b0bead}.leaf:first-child:after{top:50%}.leaf:last-child:after{bottom:50%}.leaf:only-child:after{display:none}.card{display:block;text-align:left;width:100%;border:1px solid #cfd5ca;background:#fff;border-radius:8px;padding:9px 13px;position:relative;box-shadow:0 2px 3px #26302005}.card.focus{background:var(--tint);border:1.5px solid #b05a3d;padding:8.5px 12.5px;box-shadow:0 0 0 2px #b3593712}.ctop,.ctitle,.evidencehead,.row{display:flex;align-items:center;gap:7px}.ctop{font-size:11px;justify-content:space-between;color:var(--muted);margin-bottom:2px;letter-spacing:.005em}.provider{font-weight:670;color:#4e5b50}.ctitle{font-size:16px;font-weight:700;letter-spacing:-.045em}.recent{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}.state{display:inline-flex;align-items:center;gap:4px}.state:before{content:"";height:6px;width:6px;border-radius:100%;background:#78867a}.state.wait:before{background:#b5682c}.state.run:before{background:#33817c}.state.hist:before{background:#9c9c9b}.target{font-size:11px;color:var(--accent);margin-left:auto;font-weight:600}.dropping{outline:2px dashed #9b533a!important;outline-offset:2px}.group.dropping{background:#dfe9dc99;border-radius:8px}.hint{margin:12px 3px 0;color:var(--muted);font-size:12px}.side{border-left:1px solid var(--line);background:#fff;display:flex;flex-direction:column;min-width:0}.sidehead{padding:32px 24px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px}.sidehead h2{font-size:24px;letter-spacing:-.07em}.sidehead small{color:var(--muted);font-size:12px}.chat{flex:1;max-height:calc(100dvh - 305px);min-height:250px;overflow:auto;padding:22px 20px;display:flex;flex-direction:column;gap:16px}.utter{margin-left:22px;align-self:flex-end;max-width:92%;background:#edf1e9;border-radius:12px 12px 3px 12px;padding:10px 13px;font-size:14px}.answer{font-size:14px;line-height:1.58;max-width:100%}.assistantname{font-weight:650;font-size:12px;color:var(--sage);margin:0 0 6px}.quote{border:1px solid #dce1d9;border-left:3px solid var(--sage);padding:10px 12px;background:#f8faf6;border-radius:0 8px 8px 0;margin:9px 0 0}.quote time,.sub{font-size:12px;color:var(--muted)}.quote p{margin:5px 0}.linkbtn{font-size:12px;color:#335a48;padding:3px 0;font-weight:600}.composer{padding:15px 18px 18px;border-top:1px solid var(--line);background:#fafbf7}.composer label{display:block;font-size:12px;color:var(--muted);margin-bottom:7px}.dest{display:flex;align-items:center;gap:6px;font-size:12px;color:#79452e;font-weight:650;margin-bottom:9px}.dest button{font-size:11px;color:var(--muted);text-decoration:underline}.inputbox{background:white;border:1px solid #cbd3c9;border-radius:10px;padding:9px 10px 8px}.inputbox textarea{display:block;resize:vertical;width:100%;min-height:49px;border:0;outline:none;background:none;font-size:14px;line-height:1.5}.composefoot{display:flex;align-items:center;justify-content:space-between;gap:8px}.composefoot small{font-size:11px;color:var(--muted)}.send{background:var(--accent);color:white;border-radius:7px;padding:6px 12px;font-weight:630;font-size:13px}.replyopts{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.choice{border:1px solid var(--line);padding:6px 9px;border-radius:6px;text-align:left;font-size:12px;background:white}.choice:hover{border-color:var(--sage)}.listitem{padding:14px;border:1px solid var(--line);border-radius:8px;background:#fff;margin-bottom:8px}.listitem h3{font-size:17px;margin:4px 0}.listitem p{font-size:14px;color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.empty{color:var(--muted);padding:16px}.tip{font-size:12px;color:var(--muted);padding:0 3px 8px}.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#2f4237;color:#fff;border-radius:8px;padding:9px 15px;font-size:13px;z-index:8}.toast:empty{display:none}dialog{border:1px solid var(--line);border-radius:14px;max-width:min(460px,92vw);width:460px;padding:22px;background:#fcfdf9;color:var(--ink)}dialog::backdrop{background:#25302754}dialog h2{font-size:23px}dialog p{margin:10px 0}dialog .row{justify-content:space-between}dialog select{padding:4px;font:inherit}dialog .subtitle{color:var(--muted);font-size:13px}#hiddenDrop{border:1px dashed #bec8bc}.newdot{width:7px;height:7px;border-radius:100%;background:#bd6541;display:inline-block}
+@media(min-width:1550px){.app{grid-template-columns:220px minmax(550px,1fr) minmax(400px,31%)}.card{padding:12px 16px}.card.focus{padding:11.5px 15.5px}.board{padding:18px 24px}.group{padding:11px 5px}}
+@media(max-width:1090px){.app{grid-template-columns:152px minmax(330px,1fr) 310px}.rail{padding:22px 9px}.brand{font-size:19px}.group{grid-template-columns:88px 1fr;gap:13px}.root{padding:7px 5px;font-size:12px}.branch:before{left:-13px;width:14px}main{padding:25px 15px}.sidehead{padding:24px 15px}.board{padding:9px 5px}.chat{padding:16px}.rail .sample{font-size:10px}}
+@media(max-width:840px){.app{grid-template-columns:1fr}.rail{display:flex;flex-direction:row;align-items:center;gap:12px;padding:10px 12px;border-right:none;border-bottom:1px solid var(--line);flex-wrap:wrap}.rail nav{display:flex;gap:3px}.rail .navButton{width:auto;padding:5px 7px;font-size:13px}.projects{display:none}.utilities{margin:0 0 0 auto;display:flex;align-items:center}.utilities button{padding:4px;font-size:11px}.sample{display:none}.brand{font-size:17px}.brand .mark{width:24px;height:24px}.side{border-left:none;border-top:1px solid var(--line)}.chat{max-height:390px;min-height:180px}.sidehead{padding:14px 18px}main{padding:18px}.breadcrumb{margin-bottom:7px}.group{grid-template-columns:minmax(85px,24%) 1fr}.intro{margin-bottom:12px}.sidehead small{display:block}.navicon{display:none}}
+@media(prefers-reduced-motion:no-preference){.card,.tool,.choice,.navButton{transition:background-color .12s,border-color .12s}}
+.branch,.leaf{min-width:0}.composer{margin-top:auto}@media(max-width:540px){.ctop{flex-wrap:wrap}.ctitle{flex-wrap:wrap}.app{grid-template-columns:minmax(0,1fr)}}
+
+.locale{display:flex;align-items:center;gap:3px;margin:9px 8px;padding:3px;background:#e0e5dc;border-radius:7px;width:max-content}.utilities .locale button{display:block;width:auto;padding:4px 8px;font-size:12px;line-height:1.4;border-radius:5px}.locale button[aria-pressed=true]{color:#254536;background:#fff;box-shadow:0 1px 2px #34473624}.root{text-align:left}.ctop{flex-wrap:wrap}.target{white-space:nowrap}
+html[lang=en] h1{letter-spacing:-.06em}html[lang=en] .ctitle{letter-spacing:-.025em}html[lang=en] .sidehead h2{letter-spacing:-.045em}@media(max-width:840px){.utilities{flex-wrap:wrap}.locale{margin:0 3px}}
+</style></head>
+<body><div class="app">
+<aside class="rail"><div class="brand"><span class="mark" aria-hidden="true"></span>Thread Atlas</div>
+<nav id="nav" aria-label="Views"><button class="navButton" data-view="map"><span class="navicon">⌘</span><span data-label="map"></span><small id="mapCount"></small></button><button class="navButton" data-view="inbox"><span class="navicon">▤</span><span data-label="inbox"></span><small id="inboxCount"></small></button><button id="hiddenDrop" class="navButton" data-view="hidden"><span class="navicon">⊟</span><span data-label="hidden"></span><small id="hiddenCount"></small></button></nav>
+<div class="projects"><p class="sectionlabel" data-label="projects"></p><div id="projectList"></div></div>
+<div class="utilities"><button id="connections">◌ <span data-label="connections"></span></button><button id="reset">↺ <span data-label="reset"></span></button><div class="locale" id="localePicker" role="group" aria-label="Language"><button lang="en" data-lang="en">English</button><button lang="ko" data-lang="ko">한국어</button></div><p class="sample" data-label="sample"></p></div></aside>
+<main><p class="breadcrumb"><b style="font-weight:inherit" data-label="workspace"></b> <span>/</span> <b style="font-weight:inherit" data-label="myWork"></b></p><div class="intro"><div><h1 id="heading"></h1><p class="meta" id="summary"></p></div><button class="tool" id="viewAction"></button></div><section id="canvas"></section><p class="hint" id="hint"></p></main>
+<aside class="side" id="chatPanel"><div class="sidehead"><h2 data-label="mainChat"></h2><small data-label="sampleChat"></small></div><div class="chat" id="chat" role="log" aria-live="polite"></div>
+<form class="composer" id="composer"><div class="dest" id="dest"></div><div class="inputbox"><label for="prompt" data-label="message"></label><textarea id="prompt"></textarea><div class="composefoot"><small data-label="enter"></small><button class="send" type="submit"><span data-label="send"></span> ↑</button></div></div></form></aside>
+</div><dialog id="dialog" aria-labelledby="dialogTitle"><div class="row"><h2 id="dialogTitle"></h2><button class="tool" id="closeDialog" data-label="close"></button></div><div id="dialogContent"></div></dialog><div class="toast" id="toast" role="status"></div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = value => String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let language = location.hash === '#ko' ? 'ko' : 'en';
+const t = pair => pair[language==='ko'?1:0];
+const l = (en,ko) => t([en,ko]);
+const labels = {
+ map:['Work map','작업 지도'],inbox:['Inbox','받은 답변'],hidden:['Hidden','숨김'],projects:['Projects','프로젝트'],
+ connections:['Connections','연결 범위'],reset:['Reset demo','시안 초기화'],sample:['Local design prototype','가상 세션 · 로컬 디자인 시안'],
+ workspace:['Workspace','워크스페이스'],myWork:['My work','내 작업'],mainChat:['Main chat','메인 대화'],sampleChat:['Demo conversation','가상 대화 시연'],
+ message:['Message','메시지'],enter:['Enter to send','Enter로 보내기'],send:['Send','보내기'],close:['Close','닫기'],
+ wait:['Needs reply','내 답변 필요'],history:['Imported','가져온 기록'],read:['Read-only link','읽기 연결'],run:['Running','실행 중'],
+ source:['View source','원문 보기'],reply:['Reply here','이어서 답장']
+};
+const lab = key=>t(labels[key]);
+const projects=[
+ {id:'auth',name:['Authentication','인증 개편'],tone:'#68927c'},
+ {id:'pay',name:['Payments','결제 개선'],tone:'#b48d55'},
+ {id:'release',name:['Release prep','배포 준비'],tone:'#8d82a5'}
+];
+const fixtures=[
+ {id:'token',group:'auth',title:['Token refresh bug','토큰 갱신 오류'],provider:'Codex',scope:['Local','로컬'],state:'wait',time:'17:42',
+ quote:['I fixed the race between two requests after token expiry. Should I run the regression tests?','만료 직후 두 요청이 겹치는 경우를 재현했고 수정했습니다. 회귀 테스트를 실행할까요?'],
+ keys:['login bug','token','refresh','regression','로그인 버그','토큰','갱신','만료','회귀'],direct:true},
+ {id:'ux',group:'auth',title:['Sign-in screen copy','로그인 화면 문구'],provider:'ChatGPT',scope:['Personal web','개인 웹'],state:'history',time:'16:18',
+ quote:['The opening line now explains why the user needs to sign in again.','재로그인이 필요한 이유를 안내 문구 첫 줄에 넣었습니다.'],
+ keys:['login screen','sign-in screen','sign in again','login copy','로그인 화면','안내 문구','재로그인','로그인 문구'],direct:false},
+ {id:'review',group:'auth',title:['Session expiry review','세션 만료 리뷰'],provider:'Claude',scope:['Work web','업무 웹'],state:'read',time:'17:38',
+ quote:['Separate session expiry from sign-out so people can tell why they need to log in again.','만료와 로그아웃을 구분하면 오류 메시지를 더 명확하게 쓸 수 있습니다.'],
+ keys:['session expiry','expiration','sign-out','logout','세션 만료','로그아웃','만료 리뷰'],direct:false},
+ {id:'retry',group:'pay',title:['Payment retry policy','결제 재시도 정책'],provider:'Claude Code',scope:['Terminal','터미널'],state:'wait',time:'17:35',
+ quote:['Can I retry the same payment after a timeout? What should the retry limit be?','타임아웃 시 같은 결제를 다시 보내도 될까요? 재시도 횟수를 정해 주세요.'],
+ keys:['payment','retry','retries','timeout','결제','재시도','타임아웃','횟수'],direct:true},
+ {id:'refund',group:'pay',title:['Refund status copy','환불 안내 문구'],provider:'ChatGPT',scope:['Work web','업무 웹'],state:'history',time:'15:10',
+ quote:['The draft shows the expected refund date and the request status on separate lines.','환불 예상일과 접수 상태를 한 줄씩 보여주는 초안을 작성했습니다.'],
+ keys:['refund','refund copy','refund status','환불','접수','환불 문구'],direct:false},
+ {id:'deploy',group:'release',title:['Staging deployment','스테이징 배포'],provider:'Codex',scope:['Local','로컬'],state:'run',time:'17:40',
+ quote:['The health check is running in staging.','스테이징 환경에서 헬스 체크를 실행하고 있습니다.'],
+ keys:['staging','deploy','health check','스테이징','배포','헬스 체크'],direct:true}
+];
+let items,view,filter,folded,focus,sequence,unread,messages,timer;
+const byId=id=>items.find(i=>i.id===id);
+const project=id=>projects.find(p=>p.id===id);
+const visible=()=>items.filter(i=>!i.hidden);
+const path=i=>t(project(i.group).name)+' › '+t(i.title);
+const normalize=text=>text.toLowerCase().replace(/[\s\-’']/g,'');
+function notice(text){$('toast').textContent=text;clearTimeout(timer);timer=setTimeout(()=>$('toast').textContent='',2600);}
+function showDialog(title,html){$('dialogTitle').textContent=title;$('dialogContent').innerHTML=html;$('dialog').showModal();}
+$('closeDialog').onclick=()=>$('dialog').close();
+function applyLanguage(){
+ document.documentElement.lang=language;document.title='Thread Atlas · '+l('Work map prototype','작업 지도 시안');
+ document.querySelectorAll('[data-label]').forEach(el=>el.textContent=lab(el.dataset.label));
+ document.querySelectorAll('[data-lang]').forEach(el=>el.setAttribute('aria-pressed',el.dataset.lang===language));
+ $('localePicker').setAttribute('aria-label',l('Language','언어'));$('nav').setAttribute('aria-label',l('Views','보기'));
+ $('chatPanel').setAttribute('aria-label',lab('mainChat'));$('canvas').setAttribute('aria-label',l('Sessions','작업 목록'));
+ $('prompt').placeholder=l('Find a thread or give it a follow-up…','하던 일을 찾거나 다음 요청을 입력하세요');
+ $('toast').textContent='';redraw();renderChat();
+}
+window.addEventListener('hashchange',()=>{language=location.hash==='#ko'?'ko':'en';applyLanguage();});
+function card(i){
+ return '<div class="leaf"><button class="card '+(focus===i.id?'focus':'')+'" data-card="'+i.id+'" draggable="true" title="'+esc(t(i.quote))+'"><span class="ctop"><span class="provider">'+esc(i.provider)+' · '+esc(t(i.scope))+'</span><span class="state '+(i.state==='history'?'hist':i.state)+'">'+lab(i.state)+' · '+i.time+'</span></span><span class="ctitle">'+esc(t(i.title))+(focus===i.id?'<span class="target">↳ '+l('Reply target','대화 대상')+'</span>':'')+'</span><span class="recent" style="display:block">'+esc(t(i.quote))+'</span></button></div>';
+}
+function counts(groupCount,list){
+ const waiting=list.filter(i=>i.state==='wait').length;
+ return l(groupCount+' project'+(groupCount===1?'':'s')+' · '+list.length+' session'+(list.length===1?'':'s')+' · '+waiting+' awaiting your reply','프로젝트 '+groupCount+'개　·　세션 '+list.length+'개　·　내 답변 필요 '+waiting+'개');
+}
+function redraw(){
+ const active=visible(),hidden=items.filter(i=>i.hidden);
+ $('mapCount').textContent=active.length;$('inboxCount').textContent=active.filter(i=>unread.has(i.id)).length;$('hiddenCount').textContent=hidden.length;
+ document.querySelectorAll('[data-view]').forEach(el=>el.classList.toggle('active',el.dataset.view===view));
+ $('projectList').innerHTML=projects.map(p=>'<button class="projectButton '+(filter===p.id?'active':'')+'" data-project="'+p.id+'"><span class="projectdot" style="--tone:'+p.tone+'"></span>'+esc(t(p.name))+'<small>'+active.filter(i=>i.group===p.id).length+'</small></button>').join('');
+ const area=$('canvas');area.className='';$('viewAction').hidden=view==='hidden';
+ $('heading').textContent=(view==='map'&&filter)?t(project(filter).name):lab(view);
+ if(view==='map'){
+  const groups=projects.filter(p=>!filter||p.id===filter);
+  $('summary').textContent=counts(groups.length,active.filter(i=>!filter||i.group===filter));
+  $('viewAction').textContent=groups.every(p=>folded.has(p.id))?l('Expand all','모두 펼치기'):l('Collapse all','모두 접기');
+  area.className='board';area.innerHTML=groups.map(p=>{
+   const children=active.filter(i=>i.group===p.id),n=children.length,u=children.filter(i=>unread.has(i.id)).length,w=children.filter(i=>i.state==='wait').length;
+   const brief=l(n+' session'+(n===1?'':'s')+' · '+u+' unread · '+w+' awaiting reply',n+'개 세션 · 미확인 '+u+'개 · 답변 대기 '+w+'개');
+   const branch=folded.has(p.id)?'<span class="sub">'+brief+'</span>':children.map(card).join('')||'<span class="sub">'+l('Drop a session here','여기에 카드를 놓으세요')+'</span>';
+   return '<div class="group" data-group="'+p.id+'" style="--tone:'+p.tone+'"><button class="root" data-fold="'+p.id+'" aria-expanded="'+(!folded.has(p.id))+'">'+esc(t(p.name))+'<small>'+(folded.has(p.id)?'▸':'▾')+'</small></button><div class="branch">'+branch+'</div></div>';
+  }).join('');
+  $('hint').textContent=l('Drop a card on a project to move it, or on the message box to reply to it.','카드를 프로젝트로 끌어 옮기거나 메시지 입력창에 놓아 대상을 지정하세요.');
+ }else if(view==='inbox'){
+  $('summary').textContent=l('Latest replies from visible sessions','도착순 · 숨김 세션 제외');$('viewAction').textContent=l('Simulate a reply','답변 도착 시연');
+  area.innerHTML=[...active].sort((a,b)=>b.time.localeCompare(a.time)).map(i=>'<article class="listitem"><span class="sub">'+(unread.has(i.id)?'<span class="newdot"></span> '+l('Unread','미확인')+' · ':'')+esc(t(project(i.group).name))+' · '+esc(i.provider)+' · '+i.time+'</span><h3>'+esc(t(i.title))+'</h3><p>'+esc(t(i.quote))+'</p><div class="actions"><button class="choice" data-detail="'+i.id+'">'+lab('source')+'</button><button class="choice" data-pick="'+i.id+'">'+lab('reply')+'</button></div></article>').join('')||'<p class="empty">'+l('No replies yet.','받은 답변이 없습니다.')+'</p>';
+  $('hint').textContent=l('New replies keep your draft addressed to the same thread.','답변이 추가되어도 작성 중인 메시지의 목적지는 유지됩니다.');
+ }else{
+  $('summary').textContent=l('Sessions excluded from the map, notifications, and routing','지도, 알림, 자동 대상 선택에서 제외한 세션');
+  area.innerHTML=hidden.map(i=>'<article class="listitem"><span class="sub">'+esc(t(project(i.group).name))+' · '+esc(i.provider)+'</span><h3>'+esc(t(i.title))+'</h3><button class="choice" data-restore="'+i.id+'">'+l('Restore','복구')+'</button></article>').join('')||'<p class="empty">'+l('No hidden sessions.','숨긴 세션이 없습니다.')+'</p>';$('hint').textContent='';
+ }
+ preview();
+}
+function pin(id,announce=true){const i=byId(id);if(!i||i.hidden)return;focus=id;view='map';folded.delete(i.group);if(filter&&filter!==i.group)filter=null;if(announce)notice(l('Reply target · ','대화 대상 · ')+path(i));redraw();}
+function hide(id){byId(id).hidden=true;if(focus===id)focus=null;unread.delete(id);redraw();notice(l('Session hidden. Restore it from Hidden.','숨김으로 이동 · 숨김 목록에서 복구할 수 있습니다.'));}
+function move(id,group,before){const i=byId(id);i.group=group;folded.delete(group);if(before&&before!==id){items=items.filter(x=>x.id!==id);items.splice(items.findIndex(x=>x.id===before),0,i);}redraw();notice(l('Moved to '+t(project(group).name),t(project(group).name)+'에 배치했습니다.'));}
+function detail(id){
+ const i=byId(id);unread.delete(id);redraw();
+ showDialog(t(i.title),'<p class="subtitle">'+esc(path(i))+' · '+esc(i.provider)+' · '+esc(t(i.scope))+'</p><p class="sub">'+l('Demo source thread · Latest reply ','가상 원본 스레드 · 최신 답변 ')+i.time+'</p><p>'+esc(t(i.quote))+'</p><p class="sub">'+(i.direct?l('Replies enabled in this demo','가상 연결에서 답장 가능'):l('Read-only connection','이 연결은 읽기 전용'))+'</p><div class="actions"><button class="choice" data-pick="'+i.id+'">'+l('Set as reply target','메인 창 대상으로 지정')+'</button><button class="choice" data-hide="'+i.id+'">'+l('Hide session','숨기기')+'</button></div><p><label class="sub">'+l('Move to project','프로젝트 이동')+' <select id="moveSelect">'+projects.map(p=>'<option value="'+p.id+'" '+(p.id===i.group?'selected':'')+'>'+esc(t(p.name))+'</option>').join('')+'</select></label></p>');
+ $('moveSelect').onchange=e=>{move(i.id,e.target.value);$('dialog').close();};
+}
+function route(text){
+ const active=visible(), normalized=normalize(text);
+ const waiting=/waiting (?:on|for) (?:me|my (?:reply|input))|need(?:s)? (?:my|a) reply|awaiting my reply|(답장|답변|응답).*(필요|대기|기다|할 일)|기다리는 일/i.test(text);
+ if(waiting)return {action:false,list:active.filter(i=>i.state==='wait'),waiting:true};
+ const askOriginal=/\b(?:ask|tell|message|send to)\b|물어봐|질문해\s?줘/i.test(text);
+ const lookup=!askOriginal&&/\b(where|what happened|find|show|latest|status of|how far|how did|any updates)\b|어디|찾아|찾기|상태|어떻게 됐|어떻게 되었|진행 상황|어느|최근|마지막|뭐였/i.test(text);
+ const action=askOriginal||!lookup&&/\b(run|start|go ahead|continue|proceed|set|limit|cap|change|update|fix|apply|edit|deploy it|do it|retry it|rewrite|send|ship it)\b|해줘|해 줘|돌려|진행해|진행하|진행시|보내|실행|적용|고쳐|수정해|바꿔|계속해|시작해|제한해/i.test(text);
+ const providerHint=[['Claude Code',/claude\s*code|클로드\s*코드/i],['ChatGPT',/chatgpt|챗지피티/i],['Codex',/codex|코덱스/i],['Claude',/claude|클로드/i]].find(([,pattern])=>pattern.test(text))?.[0];
+ const projectHint=projects.find(p=>p.name.some(n=>normalized.includes(normalize(n))));
+ const eligible=active.filter(i=>(!providerHint||i.provider===providerHint)&&(!projectHint||i.group===projectHint.id));
+ if(!eligible.length)return {action,list:[]};
+ const ranked=eligible.map(i=>({i,score:[...i.title,...i.keys].reduce((score,k)=>score+(normalized.includes(normalize(k))?normalize(k).length:0),0)})).sort((a,b)=>b.score-a.score);
+ const matches=ranked.filter(x=>x.score>0&&x.score>=ranked[0].score-1).map(x=>x.i);
+ if(matches.length)return {action,list:matches};
+ const followUp=/\b(then|go ahead|continue|proceed|do it|run (?:the )?tests?|that thread|same thread|current status|what next)\b|그럼|그러면|그대로|이어서|아까 그|거기|진행해|계속|테스트부터|현재 상태|어디까지 됐/i.test(text);
+ if(focus&&followUp&&eligible.some(i=>i.id===focus)&&(action||lookup))return {action,list:[byId(focus)]};
+ return {action,list:eligible};
+}
+function preview(){
+ const text=$('prompt').value.trim(),current=focus&&byId(focus);
+ if(!text){$('dest').innerHTML=current?'↳ '+esc(path(current))+' · '+esc(current.provider)+' <button type="button" data-clear>'+l('Clear','해제')+'</button>':l('Destination · Match from message','보낼 곳 · 메시지에서 찾기');return;}
+ const plan=route(text);
+ if(!plan.action){$('dest').textContent=l('Search local history','내 기록에서 찾기 · 외부 전송 없음');return;}
+ if(plan.list.length!==1){$('dest').textContent=plan.list.length?l('Choose a destination','보낼 곳 · 후보 선택 필요'):l('No matching session','보낼 곳 · 일치하는 세션 없음');return;}
+ const target=plan.list[0];$('dest').textContent=(target.direct?l('To · ','보낼 곳 · '):l('Read-only · ','읽기 전용 · '))+path(target)+' · '+target.provider;
+}
+function evidence(i){return '<div class="quote"><div class="evidencehead"><strong>'+esc(i.provider)+'</strong><time>'+esc(t(i.scope))+' · '+i.time+'</time></div><p>“'+esc(t(i.quote))+'”</p><button class="linkbtn" data-detail="'+i.id+'">'+lab('source')+' ↗</button></div>';}
+function content(m,index){
+ switch(m.kind){
+ case 'user':return esc(m.text);
+ case 'initialUser':return l('Where did we leave yesterday’s login bug?','어제 로그인 버그 보던 거 어디까지 됐지?');
+ case 'initialReply':return l('I found <strong>Token refresh bug</strong> under Authentication. The fix is in, and Codex is waiting to run the regression tests.','인증 개편의 <strong>토큰 갱신 오류</strong> 스레드입니다. 수정이 끝났고 회귀 테스트 실행을 기다리고 있습니다.')+evidence(m.item);
+ case 'source':return l('Latest reply from <strong>'+esc(path(m.item))+'</strong>.','<strong>'+esc(path(m.item))+'</strong>에서 확인했습니다.')+evidence(m.item);
+ case 'sent':return l('Demo message addressed to <strong>'+esc(path(m.item))+'</strong>.','<strong>'+esc(path(m.item))+'</strong>에 요청을 전달하는 장면입니다.')+'<div class="quote"><strong>'+esc(m.item.provider)+' · '+l('Simulated send','가상 전송')+'</strong><p>'+esc(m.text)+'</p></div>';
+ case 'readOnly':return l('<strong>'+esc(path(m.item))+'</strong> is read-only. You can copy your draft to the original thread.','<strong>'+esc(path(m.item))+'</strong>는 읽기 전용입니다. 원본에 붙여넣을 문장을 보관했습니다.')+'<div class="replyopts"><button class="choice" data-detail="'+m.item.id+'">'+lab('source')+'</button><button class="choice" data-copy="'+index+'">'+l('Copy draft','작성 문장 복사')+'</button></div>';
+ case 'choose':return l('Which thread did you mean?','어느 작업을 말씀하셨나요?')+'<div class="replyopts">'+m.options.map(i=>'<button class="choice" '+(m.chosen?'disabled':'')+' data-option="'+i.id+'" data-entry="'+index+'"><strong>'+esc(t(i.title))+'</strong> · '+esc(i.provider)+'<br>'+esc(t(i.quote))+'</button>').join('')+'</div>';
+ case 'missing':return m.waiting?l('No sessions are waiting for your reply.','현재 내 답변을 기다리는 세션이 없습니다.'):l('No visible sessions match that scope.','지정한 범위에서 보이는 세션을 찾지 못했습니다.');
+ }
+}
+function renderChat(){
+ $('chat').innerHTML=messages.map((m,index)=>{const user=m.kind==='user'||m.kind==='initialUser';return '<div class="'+(user?'utter':'answer')+'">'+(user?'':'<div class="assistantname">Thread Atlas</div>')+content(m,index)+'</div>';}).join('');
+ $('chat').scrollTop=$('chat').scrollHeight;
+}
+function handleTarget(i,text,action){pin(i.id,false);messages.push({kind:action?(i.direct?'sent':'readOnly'):'source',item:{...i},text});renderChat();}
+function submit(text){
+ messages.push({kind:'user',text});const plan=route(text);preview();
+ if(!plan.list.length)messages.push({kind:'missing',waiting:plan.waiting});
+ else if(plan.list.length===1&&!plan.waiting){handleTarget(plan.list[0],text,plan.action);return;}
+ else messages.push({kind:'choose',options:plan.list.map(i=>({...i})),text,action:plan.action});
+ renderChat();
+}
+function reset(){
+ items=fixtures.map(i=>({...i,hidden:false}));view='map';filter=null;folded=new Set();focus='token';sequence=0;unread=new Set(['review','retry']);$('prompt').value='';
+ messages=[{kind:'initialUser'},{kind:'initialReply',item:{...byId('token')}}];applyLanguage();
+}
+document.addEventListener('click',async e=>{
+ const el=e.target.closest('button');if(!el)return;const k=el.dataset;
+ if(k.lang){if(k.lang!==language){location.hash=k.lang;}return;}
+ if(k.view){view=k.view;filter=null;redraw();}
+ if(k.project){filter=filter===k.project?null:k.project;view='map';redraw();}
+ if(k.fold){folded.has(k.fold)?folded.delete(k.fold):folded.add(k.fold);redraw();}
+ if(k.card||k.detail)detail(k.card||k.detail);
+ if(k.pick){if($('dialog').open)$('dialog').close();pin(k.pick);$('prompt').focus();}
+ if(k.hide){$('dialog').close();hide(k.hide);}
+ if(k.restore){byId(k.restore).hidden=false;redraw();notice(l('Restored to its project.','원래 프로젝트에 복구했습니다.'));}
+ if('clear' in k){focus=null;redraw();}
+ if(k.option){
+  const i=byId(k.option),entry=messages[Number(k.entry)];
+  if(i.hidden){notice(l('This session is hidden.','현재 숨겨진 세션입니다.'));return;}
+  entry.chosen=i.id;handleTarget(i,entry.text,entry.action);
+ }
+ if('copy' in k){
+  const draft=messages[Number(k.copy)].text;
+  try{await navigator.clipboard.writeText(draft);notice(l('Draft copied.','문장을 복사했습니다.'));}
+  catch{$('prompt').value=draft;$('prompt').select();preview();notice(l('Copy the selected draft.','선택한 문장을 복사하세요.'));}
+ }
+});
+$('viewAction').onclick=()=>{
+ if(view==='inbox'){
+  const i=byId('deploy');if(i.hidden){notice(l('The staging session is hidden. Its notifications are muted.','숨긴 배포 세션의 알림은 표시하지 않습니다.'));return;}
+  sequence++;i.quote=sequence===1?['The health check passed. Ready for deployment approval.','헬스 체크를 통과했습니다. 배포 승인을 기다리고 있습니다.']:['The follow-up health check passed. Ready for deployment approval.','후속 헬스 체크를 통과했습니다. 배포 승인을 기다리고 있습니다.'];
+  i.time='18:'+String(sequence%60).padStart(2,'0');i.state='wait';unread.add(i.id);redraw();notice(l('New reply · ','새 답변 · ')+path(i));return;
+ }
+ const groups=projects.filter(p=>!filter||p.id===filter),close=!groups.every(p=>folded.has(p.id));groups.forEach(p=>close?folded.add(p.id):folded.delete(p.id));redraw();
+};
+$('reset').onclick=()=>{reset();notice(l('Demo reset.','가상 세션을 초기화했습니다.'));};
+$('connections').onclick=()=>showDialog(lab('connections'),'<p class="subtitle">'+l('Sample connection capabilities.','디자인 시안의 가상 연결 상태입니다.')+'</p>'+[
+ ['Codex · Local · Search and reply','Codex · 로컬 — 가상 조회와 답장'],['Claude Code · Terminal · Search and reply','Claude Code · 터미널 — 가상 조회와 답장'],
+ ['Claude · Work web · Read a connected tab','Claude · 업무 웹 — 연결한 탭 읽기'],['ChatGPT · Personal and work web · Imported history','ChatGPT · 개인 및 업무 웹 — 가져온 기록']
+].map(pair=>'<p>'+t(pair)+'</p>').join(''));
+$('composer').onsubmit=e=>{e.preventDefault();const t=$('prompt').value.trim();if(t){$('prompt').value='';submit(t);}};
+$('prompt').oninput=preview;
+$('prompt').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229){e.preventDefault();$('composer').requestSubmit();}};
+document.addEventListener('dragstart',e=>{const c=e.target.closest('[data-card]');if(c){e.dataTransfer.setData('application/x-thread-atlas',c.dataset.card);e.dataTransfer.effectAllowed='move';}});
+const dropArea=e=>e.target.closest('#hiddenDrop,#composer,[data-group]');
+document.addEventListener('dragover',e=>{const zone=dropArea(e);if(zone&&e.dataTransfer.types.includes('application/x-thread-atlas')){e.preventDefault();document.querySelectorAll('.dropping').forEach(x=>x.classList.remove('dropping'));zone.classList.add('dropping');}});
+function clean(){document.querySelectorAll('.dropping').forEach(x=>x.classList.remove('dropping'));}
+document.addEventListener('dragend',clean);
+document.addEventListener('drop',e=>{
+ const zone=dropArea(e),id=e.dataTransfer.getData('application/x-thread-atlas');clean();if(!zone||!id||!byId(id))return;e.preventDefault();
+ if(zone.id==='hiddenDrop')hide(id);
+ else if(zone.id==='composer'){pin(id);$('prompt').focus();}
+ else move(id,zone.dataset.group,e.target.closest('[data-card]')?.dataset.card);
+});
+reset();
+</script></body></html>

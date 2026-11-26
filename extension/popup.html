@@ -1,0 +1,7 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Connect Thread Atlas</title><style>
+body{width:268px;padding:16px;margin:0;font:14px/1.45 system-ui,sans-serif;color:#2b342e;background:#f7f8f2}h1{font-size:21px;margin:0 0 14px}label{display:block;margin:10px 0}input:not([type=checkbox]){box-sizing:border-box;width:100%;padding:7px;border:1px solid #b9c2b6;border-radius:5px}button{padding:7px 10px;border:0;border-radius:5px;cursor:pointer}#connect{color:white;background:#9a412a}p{font-size:12px}select{float:right}
+</style></head><body><select id="lang" aria-label="Language"><option value="en">English</option><option value="ko">한국어</option></select><h1>Thread Atlas</h1>
+<label><span id="keyLabel">Pairing key</span><input type="password" id="key" autocomplete="off"></label>
+<label><span id="accountLabel">Account label</span><input id="account" value="Personal" maxlength="120"></label>
+<label><input type="checkbox" id="write"><span id="writeLabel">Allow replies to this thread</span></label>
+<button id="connect">Connect tab</button> <button id="disconnect">Disconnect</button><p><button id="all">Track open chats (read-only)</button></p><p id="status" role="status"></p><script src="popup.js"></script></body></html>
