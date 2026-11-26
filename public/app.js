@@ -113,8 +113,9 @@ async function edit(id,changes){await api('edit',{id,...changes});await refresh(
 async function handle(i,body,action,key,match){
  if(!i||i.hidden)throw Error(l('Session unavailable','세션을 사용할 수 없습니다'));
  if(!action){pin(i.id,false);
-  // The message that matched is shown with the latest reply unless it is that reply.
-  const older=match&&!(match.role==='assistant'&&match.at===i.latest_at)?match:null;
+  // The message that matched is shown with the latest reply unless it is that reply. Times can be missing (0) until
+  // an export fills them in, so the reply is recognised by its text: the excerpt without its elided ends.
+  const older=match&&!(match.role==='assistant'&&(i.latest||'').includes(match.snippet.replace(/^…|…$/g,'')))?match:null;
   push({kind:'source',session:i.id,path:path(i),provider:i.provider,at:i.latest_at,body:i.latest||l('No assistant reply yet.','아직 답변이 없습니다.'),match:older});return;}
  if(!i.direct){push({kind:'readonly',path:path(i),session:i.id,body});return;}
  const d=await api('send',{id:key,session:i.id,body});pin(i.id,false);push({kind:'delivery',session:i.id,key,body,path:path(i),status:d.status});await refresh(true);
