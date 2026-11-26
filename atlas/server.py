@@ -17,7 +17,7 @@ from aiohttp import ClientError, web
 
 from .codex import Codex, output
 from .codex_history import import_codex_history
-from .indexer import epoch, import_export, scan
+from .indexer import epoch, import_export, read_export_archive, refresh_chatgpt_downloads, scan
 from .store import Store, ident
 
 ROOT=Path(__file__).resolve().parent.parent
@@ -25,7 +25,7 @@ WEB_PROVIDERS=('ChatGPT','Claude')
 
 
 class Service:
-    def __init__(self,data,codex_dir,claude_dir,port,notifications=False):
+    def __init__(self,data,codex_dir,claude_dir,port,notifications=False,*,downloads_dir=None):
         data.mkdir(parents=True,exist_ok=True,mode=0o700)
         self.lock=(data/'service.lock').open('a')
         fcntl.flock(self.lock.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -37,6 +37,7 @@ class Service:
         self.store.db.execute("UPDATE deliveries SET status='uncertain',detail='Reconnect to verify the reply' WHERE status='delivered' AND tab!=''")
         self.store.db.execute("UPDATE deliveries SET status='uncertain',detail='Service restarted before the reply was confirmed' WHERE status='delivered' AND tab=''")
         self.codex_dir,self.claude_dir=codex_dir,claude_dir
+        self.downloads_dir = downloads_dir if downloads_dir is not None else Path.home() / "Downloads"
         self.port=port;self.token=secrets.token_urlsafe(32);self.login=secrets.token_urlsafe(32)
         self.bridge=self.store.pref('bridge') or secrets.token_urlsafe(32)
         self.store.db.execute("INSERT OR IGNORE INTO prefs VALUES('bridge',?)",(self.bridge,))
@@ -54,10 +55,11 @@ class Service:
             try:
                 await asyncio.to_thread(scan,self.store,self.codex_dir,self.claude_dir)
                 self.last_scan=time.time();self.scan_status='Ready'
-                for row in self.store.db.execute("""SELECT m.seq,s.title,s.provider,s.id FROM messages m JOIN sessions s ON s.id=m.session
+                for row in self.store.db.execute("""SELECT m.seq,s.id FROM messages m JOIN sessions s ON s.id=m.session
                     WHERE m.alert=1 AND m.seq>? ORDER BY m.seq""",(self.notification_seq,)).fetchall():
                     self.notification_seq=row['seq']
-                    if not self.store.session_row(row['id'])['hidden']:await self.notify(row['seq'],row['title'],row['provider'])
+                    session=self.store.session_row(row['id'])
+                    if not session['hidden']:await self.notify(row['seq'],session['custom_title'] or session['title'],session['provider'])
             except Exception as e:self.scan_status='Index unavailable: '+type(e).__name__
             await asyncio.sleep(2)
 
@@ -152,6 +154,8 @@ class Service:
                 return dict(old)
             s=self.store.session_row(sid)
             if s['hidden']:raise ValueError('Session is '+s['effective_status'])
+            if data.get('active_only') is True and s['effective_status']!='active':
+                raise ValueError('The matched thread is no longer Active. Choose a destination to reply directly.')
             if s['provider'] in WEB_PROVIDERS and (not s['bridge'] or not s['writable'] or time.time()-s['live_at']>35):raise ValueError('Web thread is offline or read-only')
             if s['provider']=='Codex' and not self.codex_ok:raise ValueError('Codex App Server is offline')
             if s['provider']=='Claude Code' and not self.claude_ok:raise ValueError('Claude Code is offline')
@@ -245,23 +249,28 @@ class Service:
         path=d.get('pathname','')
         if provider=='ChatGPT' and re.fullmatch(r'/g/[\w-]+/c/'+re.escape(source),path):
             url='https://chatgpt.com'+path
+        messages = d.get('messages', [])[:160]
+        user_prompts = (m.get('text') for m in messages if isinstance(m, dict) and m.get('role') == 'user')
+        initial=bool(d.get('initial'))
         with self.store.tx():
-            sid=self.store.session(provider,account,source,title=str(d.get('title') or '')[:180],url=url)
+            known_session = initial and self.store.db.execute(
+                "SELECT 1 FROM sessions WHERE id=?", (ident(provider,account,source),)).fetchone() is not None
+            sid=self.store.session(provider,account,source,title=str(d.get('title') or '')[:180],url=url,user_prompts=user_prompts)
             s=self.store.session_row(sid)
             if s['bridge'] and s['bridge']!=tab and time.time()-s['live_at']<35:raise ValueError('Thread already connected in another tab')
             self.store.db.execute("UPDATE sessions SET live_at=?,bridge=?,writable=?,state=? WHERE id=?",(time.time(),tab,int(bool(d.get('writable'))),'run' if d.get('busy') else 'idle',sid))
             # A page shows no send time. History read on connect is filed after what is already known, so it neither
             # looks new nor outranks real arrivals in the inbox. Only messages seen arriving are stamped with the clock.
-            initial=bool(d.get('initial'));seen={}
+            seen={}
             known=self.store.db.execute("SELECT COALESCE(max(at),0) FROM messages WHERE session=?",(sid,)).fetchone()[0] if initial else 0
-            for m in d.get('messages',[])[:160]:
+            for m in messages:
                 if not isinstance(m,dict):continue
                 body=m.get('text');role=m.get('role');mid=m.get('id')
                 if not isinstance(body,str) or role not in ('user','assistant') or not isinstance(mid,str):continue
                 stamp=epoch(m.get('at'))
                 self.store.merge_message(sid,mid,role,body,stamp or (known if initial else time.time()),
                                          initial,seen,not initial,estimated=not stamp)
-            if initial:self.store.finish_batch(sid,seen)
+            if initial:self.store.finish_batch(sid,seen,mark_reply=known_session)
             job=None
             if not d.get('busy') and d.get('writable') and not s['hidden'] and not self.store.db.execute("SELECT 1 FROM deliveries WHERE session=? AND status IN ('claimed','delivered') AND tab!=''",(sid,)).fetchone():
                 row=self.store.db.execute("SELECT id,body FROM deliveries WHERE session=? AND tab=? AND status='queued' ORDER BY created LIMIT 1",(sid,tab)).fetchone()
@@ -303,7 +312,10 @@ def application(s):
     async def api(req):
         action=req.match_info['action']
         if req.method=='GET':
-            if action=='state':value=s.snapshot(int(req.query['after']) if 'after' in req.query else None)
+            if action=='state':
+                value=s.snapshot(int(req.query['after']) if 'after' in req.query else None)
+                provider,session=req.query.get('activity_provider'),req.query.get('activity_thread')
+                if provider or session:value['activity']=s.store.recent_replies(provider or None,session or None)
             elif action=='history':value=s.store.history(req.query['id'])
             elif action=='reply':
                 seq=req.query.get('seq','')
@@ -318,12 +330,21 @@ def application(s):
             if req.content_type!='application/json':raise web.HTTPUnsupportedMediaType()
             d=await req.json()
             if action=='edit':s.store.edit(d['id'],d);value={'ok':True}
-            elif action=='group':value={'id':s.store.group(d['name'],d.get('parent'))}
+            elif action=='trash-session':s.store.set_session_trashed(d['id'],d['trashed']);value={'ok':True}
+            elif action=='undo':s.store.undo_workspace_edit(d['id']);value={'ok':True}
+            elif action=='todo-create':value={'id':s.store.add_todo(d['group'],d['body'])}
+            elif action=='todo-completed':s.store.set_todo_completed(d['id'],d['completed']);value={'ok':True}
+            elif action=='todo-move':s.store.move_todo(d['id'],d['group'],d.get('neighbor'),d.get('side','before'));value={'ok':True}
+            elif action=='folder-setup':s.store.finish_folder_setup(d['paths']);value={'ok':True}
+            elif action=='group':value={'id':s.store.create_project(d['name'],d.get('parent'))}
             elif action=='move-group':s.store.move_group(d['id'],d['parent']);value={'ok':True}
             elif action=='reorder-group':s.store.reorder_group(d['id'],d['sibling'],d['side']);value={'ok':True}
             elif action=='group-status':s.store.set_project_status(d['id'],d['workspace_status']);value={'ok':True}
             elif action=='send':value=s.enqueue(d)
             elif action=='import-codex':value=await s.import_codex()
+            elif action=='refresh-chatgpt':
+                result = await asyncio.to_thread(refresh_chatgpt_downloads, s.store, s.downloads_dir, d.get('account'))
+                value = {'result': result}
             elif action=='import':value={'count':await asyncio.to_thread(import_export,s.store,d['provider'],d['account'],d['data'])}
             elif action=='notifications':s.store.db.execute("INSERT OR REPLACE INTO prefs VALUES('notifications',?)",('1' if d.get('enabled') else '0',));value={'ok':True}
             else:raise web.HTTPNotFound()
@@ -335,14 +356,7 @@ def application(s):
         def parse():
             if raw.startswith(b'PK'):
                 with zipfile.ZipFile(io.BytesIO(raw)) as z:
-                    names=[i for i in z.infolist() if re.fullmatch(r'conversations(?:[-_]?[0-9]+)?\.json',Path(i.filename).name,re.I)]
-                    if not names or sum(i.file_size for i in names)>256*1024**2:raise ValueError('Missing or oversized conversations JSON in ZIP')
-                    all_chats=[]
-                    for i in names:
-                        batch=json.loads(z.read(i))
-                        if isinstance(batch,dict):batch=batch.get('conversations')
-                        if not isinstance(batch,list):raise ValueError('Invalid export file')
-                        all_chats.extend(batch)
+                    all_chats = read_export_archive(z)
             else:all_chats=json.loads(raw)
             return import_export(s.store,provider,account,all_chats)
         try:count=await asyncio.to_thread(parse)
@@ -379,10 +393,11 @@ def main():
     parser.add_argument('--data',type=Path,default=data_root/'Thread Atlas')
     parser.add_argument('--codex-dir',type=Path,default=Path(os.environ.get('CODEX_HOME',Path.home()/'.codex'))/'sessions')
     parser.add_argument('--claude-dir',type=Path,default=Path(os.environ.get('CLAUDE_CONFIG_DIR',Path.home()/'.claude'))/'projects')
+    parser.add_argument('--downloads-dir',type=Path,help='Folder checked by Refresh ChatGPT (defaults to ~/Downloads)')
     parser.add_argument('--port',type=int,default=43821)
     parser.add_argument('--no-open',action='store_true');parser.add_argument('--notify',action='store_true')
     args=parser.parse_args()
-    try:s=Service(args.data,args.codex_dir,args.claude_dir,args.port,args.notify)
+    try:s=Service(args.data,args.codex_dir,args.claude_dir,args.port,args.notify,downloads_dir=args.downloads_dir)
     except BlockingIOError:
         url=(args.data/'launch.url').read_text().strip()
         if not args.no_open:webbrowser.open(url)

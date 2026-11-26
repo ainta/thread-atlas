@@ -7,6 +7,7 @@ import time
 import unittest
 from pathlib import Path
 
+from atlas.classification import CHATGPT_PROJECT_PHRASES
 from atlas.codex_history import import_codex_history
 from atlas.indexer import import_export,scan,scan_file
 from atlas.store import Store
@@ -17,6 +18,176 @@ class StoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.store=Store(self.root/'workspace.sqlite')
+
+    def test_first_run_folder_setup_preserves_discovered_chats_and_supports_undo(self):
+        store = self.store
+        self.assertTrue(store.state()["folder_setup"])
+        self.assertEqual(store.state()["groups"], [])
+        thread = store.session("Codex", "local", "persisted")
+        unclassified = store.session_row(thread)["group_id"]
+        self.assertTrue(store.state()["folder_setup"])
+        with self.assertRaisesRegex(ValueError, "Folder names"):
+            store.finish_folder_setup([["Research", " "], ["Life"]])
+        self.assertEqual([group["id"] for group in store.state()["groups"]], [unclassified])
+        store.finish_folder_setup([["Research", "Benchmarks", "Long sequences"], ["Life"], ["Study"]])
+        configured = store.state()
+        self.assertFalse(configured["folder_setup"])
+        folders = {group["name"]: group for group in configured["groups"]}
+        self.assertEqual(folders["Long sequences"]["parent_id"], folders["Benchmarks"]["id"])
+        self.assertEqual(folders["Benchmarks"]["parent_id"], folders["Research"]["id"])
+        self.assertEqual(folders["Unclassified"]["id"], unclassified)
+        store.finish_folder_setup([["Ignored retry"]])
+        self.assertEqual(store.state()["groups"], configured["groups"])
+        store.undo_workspace_edit(configured["undo"]["id"])
+        self.assertEqual([group["id"] for group in store.state()["groups"]], [unclassified])
+        self.assertEqual(store.session_row(thread)["group_id"], unclassified)
+
+    def test_first_run_setup_can_be_skipped_and_is_unavailable_on_upgrade(self):
+        self.store.finish_folder_setup(None)
+        reopened = Store(self.store.path)
+        self.addCleanup(reopened.db.close)
+        self.assertFalse(reopened.state()["folder_setup"])
+        self.assertEqual(reopened.state()["groups"], [])
+        self.assertEqual(reopened.state()["undo"]["count"], 0)
+
+        old_path = self.root / "old.sqlite"
+        previous = sqlite3.connect(old_path)
+        previous.executescript("CREATE TABLE prefs(key TEXT PRIMARY KEY, value TEXT); INSERT INTO prefs VALUES('baseline','1');")
+        previous.close()
+        upgraded = Store(old_path)
+        self.addCleanup(upgraded.db.close)
+        self.assertFalse(upgraded.state()["folder_setup"])
+        upgraded.finish_folder_setup([["Research"]])
+        self.assertEqual(upgraded.state()["groups"], [])
+
+    def test_project_todos_are_persistent_and_undoable(self):
+        research = self.store.group("Research")
+        study = self.store.group("Study")
+        first = self.store.add_todo(research, " Review the draft ")
+        second = self.store.add_todo(study, "Read chapter two")
+        with self.assertRaisesRegex(ValueError, "Unknown project"):
+            self.store.add_todo("missing", "Do something")
+        self.store.set_todo_completed(first, True)
+        self.store.set_todo_completed(first, True)
+        reopened = Store(self.store.path)
+        self.addCleanup(reopened.db.close)
+        state = reopened.state()
+        self.assertEqual(state["undo"]["count"], 3)
+        self.assertEqual([(todo["id"], todo["group_id"], todo["body"], todo["completed"]) for todo in state["todos"]], [
+            (second, study, "Read chapter two", 0), (first, research, "Review the draft", 1),
+        ])
+        reopened.undo_workspace_edit(state["undo"]["id"])
+        self.assertFalse(any(todo["completed"] for todo in reopened.state()["todos"]))
+        reopened.undo_workspace_edit(reopened.state()["undo"]["id"])
+        self.assertEqual([todo["id"] for todo in reopened.state()["todos"]], [first])
+
+    def test_original_urls_and_scoped_replies(self):
+        store = self.store
+        source = "018f5df2-fb97-7b4f-9d3a-c24abafa7c84"
+        codex = store.session("Codex", "local", source)
+        web_url = "https://chatgpt.com/c/web-fixture"
+        web = store.session("ChatGPT", "personal", "web-fixture", url=web_url)
+        store.message(codex, "local-reply", "assistant", "Local reply", 100)
+        store.message(web, "web-reply", "assistant", "Web reply", 200)
+        store.message(codex, "local-user", "user", "Follow-up", 300)
+        sessions = {item["id"]: item for item in store.state()["sessions"]}
+        self.assertEqual(sessions[codex]["url"], f"codex://threads/{source}")
+        self.assertEqual(sessions[web]["url"], web_url)
+        self.assertEqual([row["session"] for row in store.recent_replies()], [web, codex])
+        self.assertEqual([row["session"] for row in store.recent_replies(provider="Codex")], [codex])
+        self.assertEqual([row["session"] for row in store.recent_replies(session=web)], [web])
+        self.assertEqual(store.recent_replies(provider="Codex", session=web), [])
+        store.edit(codex, {"workspace_status": "hidden"})
+        self.assertEqual(store.recent_replies(session=codex), [])
+
+    def test_move_todo_preserves_order_and_checked_status(self):
+        store = self.store
+        first_project = store.group("First project")
+        second_project = store.group("Second project")
+        first = store.add_todo(first_project, "First item")
+        second = store.add_todo(first_project, "Second item")
+        done = store.add_todo(first_project, "Checked item")
+        destination = store.add_todo(second_project, "Destination item")
+        store.set_todo_completed(done, True)
+
+        def checklist(project):
+            return [(todo["id"], todo["completed"]) for todo in store.state()["todos"] if todo["group_id"] == project]
+
+        store.move_todo(second, first_project, first)
+        self.assertEqual(checklist(first_project), [(second, 0), (first, 0), (done, 1)])
+        reorder = store.state()["undo"]["id"]
+        with self.assertRaisesRegex(ValueError, "same checked status"):
+            store.move_todo(done, second_project, destination)
+        self.assertEqual(store.state()["undo"]["id"], reorder)
+        store.move_todo(first, second_project, destination, "after")
+        store.move_todo(done, second_project)
+        self.assertEqual(checklist(first_project), [(second, 0)])
+        self.assertEqual(checklist(second_project), [(destination, 0), (first, 0), (done, 1)])
+        for _ in range(2):
+            store.undo_workspace_edit(store.state()["undo"]["id"])
+        self.assertEqual(checklist(first_project), [(second, 0), (first, 0), (done, 1)])
+        store.undo_workspace_edit(reorder)
+        self.assertEqual(checklist(first_project), [(first, 0), (second, 0), (done, 1)])
+        self.assertEqual(checklist(second_project), [(destination, 0)])
+
+    def test_chatgpt_import_files_clear_topics_and_keeps_existing_placement(self):
+        store = self.store
+        unclassified = store.group()
+        research = store.group("research")
+        research_inbox = store.group("Unclassified", research)
+        memory = store.group("memory tests", research)
+        ranking = store.group("ranking tests", research)
+        life = store.group("life")
+        french = store.group("french", life)
+        study = store.group("study")
+        deep_learning = store.group("deep learning", study)
+        architecture = store.group("architecture", deep_learning)
+        store.db.execute("INSERT INTO prefs VALUES(?, ?)", (CHATGPT_PROJECT_PHRASES, json.dumps({
+            research: ["research proposal"], memory: ["long-context profiling"], ranking: ["ranking ablation"],
+            french: ["french grammar"], architecture: ["neural network architecture"],
+        })))
+        cases = [
+            ("strong", "Long-context profiling experiments", memory),
+            ("research", "Draft a research proposal", research_inbox),
+            ("ambiguous-research", "Long-context profiling and ranking ablation", research_inbox),
+            ("ambiguous", "Ranking ablation and French grammar", unclassified),
+            ("generic", "Notes", unclassified),
+            ("context", "A new idea", architecture),
+            ("generic-label", "Deep learning reading plan", deep_learning),
+        ]
+        conversations = [{"id": key, "title": title, "mapping": {}} for key, title, _ in cases]
+        conversations[5]["mapping"] = {"node": {"message": {
+            "id": "user-1", "author": {"role": "user"}, "content": {"parts": ["Compare neural network architecture options."]},
+        }}}
+        conversations[4]["mapping"] = {"node": {"message": {
+            "id": "assistant-1", "author": {"role": "assistant"}, "content": {"parts": ["An unrelated mention of long-context profiling."]},
+        }}}
+        self.assertEqual(import_export(store, "ChatGPT", "Personal", conversations), len(cases))
+        sessions = {row["title"]: row for row in store.state()["sessions"]}
+        for _, title, expected in cases:
+            with self.subTest(title=title):
+                self.assertEqual(sessions[title]["group_id"], expected)
+        self.assertEqual(len(store.state()["groups"]), 10)
+        key = sessions[cases[0][1]]["id"]
+        store.edit(key, {"group": life, "workspace_status": "active"})
+        import_export(store, "ChatGPT", "Personal", conversations)
+        row = store.session_row(key)
+        self.assertEqual((row["group_id"], row["workspace_status"]), (life, "active"))
+
+    def test_new_chatgpt_tab_uses_visible_folders(self):
+        service = Service(self.root / "tabs", self.root, self.root, 12345)
+        self.addCleanup(service.lock.close)
+        store = service.store
+        self.addCleanup(store.db.close)
+        visible = store.group("Training plans")
+        hidden = store.group("Private project")
+        store.set_project_status(hidden, "hidden")
+        for source, title, expected in (("first", "Training plans", visible),
+                                        ("second", "Private project", store.group())):
+            with self.subTest(title=title):
+                result = service.web_sync({"provider": "ChatGPT", "account": "Personal", "source": source,
+                                           "tab": f"test-tab-{source}", "title": title, "initial": True})
+                self.assertEqual(store.session_row(result["session"])["group_id"], expected)
 
     def test_flat_projects_migrate_with_existing_ids_and_session_links(self):
         path = self.root / "legacy.sqlite"
@@ -37,6 +208,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(migrated.group("Research"), "legacy-project")
         self.assertEqual(migrated.session_row("legacy-session")["group_id"], "legacy-project")
         self.assertEqual(migrated.session_row("legacy-session")["workspace_status"], "default")
+        self.assertIsNone(migrated.session_row("legacy-session")["trashed_at"])
+        self.assertEqual(migrated.session_row("legacy-session")["is_new"], 0)
+        self.assertEqual(migrated.session_row("legacy-session")["custom_title"], "")
         hidden = migrated.session_row("hidden-session")
         self.assertEqual((hidden["workspace_status"], hidden["group_id"]), ("hidden", "legacy-project"))
         parent = migrated.db.execute("SELECT parent_id FROM groups WHERE id='legacy-project'").fetchone()
@@ -119,6 +293,190 @@ class StoreTests(unittest.TestCase):
         self.assertFalse(session["hidden"])
         self.assertEqual([row["body"] for row in store.history(sid)], ["First reply", "Later reply"])
         self.assertEqual(len(store.alerts_after(0)[0]), 1)
+
+    def test_new_thread_and_newly_imported_reply_have_independent_attention(self):
+        store = self.store
+
+        def export(*replies):
+            return [{"uuid": "sample", "name": "Sample", "chat_messages": [
+                {"uuid": key, "sender": "assistant", "text": body, "created_at": at}
+                for key, body, at in replies
+            ]}]
+
+        first = ("reply-1", "The first reply.", "2025-01-02T00:00:00Z")
+        next_reply = ("reply-2", "The next reply.", "2025-01-03T00:00:00Z")
+        import_export(store, "Claude", "Personal", export(first))
+        initial = store.state()["sessions"][0]
+        self.assertEqual((initial["is_new"], initial["unread"]), (1, 0))
+        sid = initial["id"]
+        opened = store.history(sid)[-1]["seq"]
+
+        import_export(store, "Claude", "Personal", export(first, next_reply))
+        updated = store.state()["sessions"][0]
+        self.assertEqual((updated["is_new"], updated["unread"]), (1, 1))
+        self.assertEqual(initial["unread_through"], 0)
+        self.assertEqual(updated["unread_through"], store.history(sid)[-1]["seq"])
+        self.assertTrue(store.state()["inbox"][0]["unread"])
+        self.assertFalse(store.alerts_after(0)[0])
+        store.edit(sid, {"read": True, "read_through": opened})
+        self.assertEqual((store.state()["sessions"][0]["is_new"], store.state()["sessions"][0]["unread"]), (0, 1))
+        store.edit(sid, {"read": True})
+        import_export(store, "Claude", "Personal", export(first, next_reply))
+        import_export(store, "Claude", "Personal", export(("older", "Earlier history.", "2025-01-01T00:00:00Z")))
+        after = store.state()["sessions"][0]
+        self.assertEqual((after["is_new"], after["unread"], after["latest"]), (0, 0, "The next reply."))
+
+        arrival = time.time()
+        store.message(sid, "live", "assistant", "A live reply.", arrival)
+        displayed = store.state()["sessions"][0]["unread_through"]
+        self.assertGreater(displayed, 0)
+        store.message(sid, "arrived-later", "assistant", "A newer live reply.", arrival + 1)
+        store.edit(sid, {"read": True, "read_through": displayed})
+        current = store.state()["sessions"][0]
+        self.assertTrue(current["unread"])
+        self.assertGreater(current["unread_through"], displayed)
+        store.edit(sid, {"read": True, "read_through": current["unread_through"]})
+        self.assertEqual(store.state()["sessions"][0]["unread_through"], 0)
+
+    def test_trash_persists_and_restore_recovers_workspace_status_and_history(self):
+        service = Service(self.root / "trash", self.root, self.root, 12345)
+        self.addCleanup(service.lock.close)
+        store = service.store
+        self.addCleanup(store.db.close)
+        project = store.group("Benchmarks", store.group("Research"))
+        source = "11111111-1111-1111-1111-111111111111"
+        sid = store.session("Codex", "local", source, "Research")
+        store.edit(sid, {"group": project, "workspace_status": "active"})
+        service.codex_ok = True
+        store.message(sid, "first", "assistant", "First reply", time.time())
+        draft = {"id": "trash-queued-0001", "session": sid, "body": "Continue"}
+        self.assertEqual(service.enqueue(draft)["status"], "queued")
+
+        original = store.session_row(sid)
+        store.set_session_trashed(sid, True)
+        trashed_at = store.session_row(sid)["trashed_at"]
+        store.set_session_trashed(sid, True)
+        self.assertEqual(store.session("Codex", "local", source, "Refreshed title"), sid)
+        trashed = service.snapshot()["sessions"][0]
+        self.assertEqual(trashed["trashed_at"], trashed_at)
+        self.assertEqual(trashed["effective_status"], "trashed")
+        self.assertTrue(trashed["hidden"])
+        self.assertFalse(trashed["direct"])
+        self.assertFalse(store.state()["inbox"])
+        self.assertFalse(store.alerts_after(0)[0])
+        self.assertFalse(service.begin_local_delivery(draft["id"]))
+        with self.assertRaisesRegex(ValueError, "trashed"):
+            service.enqueue({**draft, "id": "trash-blocked-0001"})
+
+        reopened = Store(store.path)
+        self.addCleanup(reopened.db.close)
+        self.assertEqual(reopened.session_row(sid)["trashed_at"], trashed_at)
+        reopened.set_session_trashed(sid, False)
+        reopened.set_session_trashed(sid, False)
+        restored = reopened.session_row(sid)
+        self.assertIsNone(restored["trashed_at"])
+        for key in ("group_id", "position", "workspace_status", "effective_status"):
+            self.assertEqual(restored[key], original[key])
+        self.assertEqual([row["body"] for row in reopened.history(sid)], ["First reply"])
+        self.assertEqual(service.enqueue(draft)["status"], "failed")
+        self.assertTrue(reopened.state()["inbox"])
+
+        for status in ("hidden", "excluded"):
+            with self.subTest(status=status):
+                reopened.edit(sid, {"workspace_status": status})
+                previous = reopened.session_row(sid)
+                reopened.set_session_trashed(sid, True)
+                self.assertEqual(reopened.session_row(sid)["effective_status"], "trashed")
+                reopened.set_session_trashed(sid, False)
+                self.assertEqual(reopened.session_row(sid), previous)
+
+    def test_rename_survives_sync_and_can_restore_latest_source_title(self):
+        store = self.store
+        sid = store.session("ChatGPT", "Personal", "rename-sample", title="Original title")
+        with self.assertRaisesRegex(ValueError, "thread name"):
+            store.edit(sid, {"title": "   "})
+        store.edit(sid, {"title": "  Benchmark planning  "})
+        change_id = store.state()["undo"]["id"]
+        store.session("ChatGPT", "Personal", "rename-sample", title="Updated source title")
+        reopened = Store(store.path)
+        self.addCleanup(reopened.db.close)
+        self.assertEqual(reopened.state()["sessions"][0]["title"], "Benchmark planning")
+        self.assertEqual(reopened.session_row(sid)["title"], "Updated source title")
+        self.assertEqual(reopened.state()["undo"]["id"], change_id)
+        reopened.edit(sid, {"title": None})
+        self.assertEqual(reopened.state()["sessions"][0]["title"], "Updated source title")
+        reopened.undo_workspace_edit(reopened.state()["undo"]["id"])
+        self.assertEqual(reopened.state()["sessions"][0]["title"], "Benchmark planning")
+        reopened.undo_workspace_edit(change_id)
+        self.assertEqual(reopened.state()["sessions"][0]["title"], "Updated source title")
+
+    def test_undo_reverses_latest_workspace_edits_after_reopening(self):
+        store = self.store
+        project = store.group("Research")
+        sid = store.session("Codex", "local", "research", "Research", title="Original")
+        store.edit(sid, {"workspace_status": "active"})
+        stale = store.state()["undo"]["id"]
+        store.edit(sid, {"workspace_status": "hidden"})
+        store.set_session_trashed(sid, True)
+        store.set_session_trashed(sid, True)
+        store.session("Codex", "local", "research", title="New indexed title")
+        store.session("Codex", "local", "new")
+        store.message(sid, "latest", "assistant", "New message", time.time())
+        store.edit(sid, {"read": True})
+        self.assertEqual(store.state()["undo"]["count"], 3)
+        with self.assertRaisesRegex(ValueError, "Workspace changed"):
+            store.undo_workspace_edit(stale)
+
+        reopened = Store(store.path)
+        self.addCleanup(reopened.db.close)
+        for remaining, status in ((2, "hidden"), (1, "active"), (0, "default")):
+            undo = reopened.state()["undo"]
+            reopened.undo_workspace_edit(undo["id"])
+            with self.assertRaisesRegex(ValueError, "Workspace changed"):
+                reopened.undo_workspace_edit(undo["id"])
+            self.assertEqual(reopened.state()["undo"]["count"], remaining)
+            restored = reopened.session_row(sid)
+            self.assertEqual((restored["group_id"], restored["effective_status"]), (project, status))
+            self.assertEqual(restored["title"], "New indexed title")
+        self.assertEqual([row["body"] for row in reopened.history(sid)], ["New message"])
+        self.assertEqual(len(reopened.state()["sessions"]), 2)
+
+    def test_undo_keeps_only_the_last_ten_edits(self):
+        store = self.store
+        sid = store.session("Codex", "local", "research")
+        for status in ["active", "default"] * 5 + ["active"]:
+            store.edit(sid, {"workspace_status": status})
+        for remaining in range(10, 0, -1):
+            undo = store.state()["undo"]
+            self.assertEqual(undo["count"], remaining)
+            store.undo_workspace_edit(undo["id"])
+        self.assertEqual(store.state()["undo"], {"id": None, "count": 0})
+        self.assertEqual(store.session_row(sid)["workspace_status"], "active")
+
+    def test_undo_recovers_folder_layout_and_leaves_newly_indexed_threads(self):
+        store = self.store
+        research = store.group("Research")
+        thesis = store.group("Thesis")
+        placeholder = store.group("Thesis", research)
+        store.set_project_status(placeholder, "excluded")
+        sid = store.session("Codex", "local", "old", "Thesis")
+        original = store.state()["groups"]
+
+        store.move_group(thesis, research)
+        notes = store.create_project("Notes", research)
+        self.assertEqual(store.create_project("Notes", research), notes)
+        store.reorder_group(notes, thesis, "after")
+        store.edit(sid, {"group": notes})
+        new_sid = store.session("Codex", "local", "new")
+        self.assertEqual(store.state()["undo"]["count"], 5)
+
+        store.undo_workspace_edit(store.state()["undo"]["id"])
+        self.assertEqual(store.session_row(sid)["group_id"], thesis)
+        for _ in range(3):
+            store.undo_workspace_edit(store.state()["undo"]["id"])
+        self.assertEqual([folder for folder in store.state()["groups"] if folder["name"] != "Unclassified"], original)
+        self.assertEqual(store.state()["undo"]["count"], 1)
+        self.assertEqual(store.session_row(new_sid)["group_id"], store.group())
 
     def test_move_past_empty_excluded_placeholder_keeps_both_projects(self):
         research = self.store.group("Research")
@@ -396,9 +754,10 @@ class StoreTests(unittest.TestCase):
         history=service.store.history(sid)
         self.assertEqual([m['role'] for m in history],['user','assistant','user','assistant','user','assistant'])
         self.assertEqual(history[1]['body'],export['chat_messages'][1]['text'])
-        # History first read from a page carries no clock time, so it does not look newer than the last known message.
+        # The extra reply follows known history. It is unread but keeps the snapshot timestamp and sends no alert.
         self.assertLess(service.store.session_row(sid)['latest_at'],time.time()-3600)
-        self.assertFalse(service.snapshot()['sessions'][0]['unread'])
+        self.assertTrue(service.snapshot()['sessions'][0]['unread'])
+        self.assertFalse(service.store.alerts_after(0)[0])
         service.web_sync({**page,'initial':False,'messages':[{'id':'dom-assistant-g','role':'assistant','text':'A live reply','at':0}]})
         self.assertGreater(service.store.session_row(sid)['latest_at'],time.time()-60)
 

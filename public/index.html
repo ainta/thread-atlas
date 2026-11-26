@@ -2,15 +2,60 @@
 <aside class="rail"><div class="brand"><span class="mark" aria-hidden="true"></span>Thread Atlas</div>
 <nav id="nav" aria-label="Views">
  <button class="navButton" data-view="map"><span class="navicon" aria-hidden="true">⌘</span><span data-label="map"></span><small id="mapCount"></small></button>
+ <button class="navButton" data-view="updates"><span class="navicon" aria-hidden="true">↻</span><span data-label="updates"></span><small id="updatesCount"></small></button>
+ <button class="navButton" data-view="todos"><span class="navicon" aria-hidden="true">☑</span><span data-label="todos"></span><small id="todosCount"></small></button>
  <button class="navButton" data-view="active"><span class="navicon" aria-hidden="true">●</span><span data-label="active"></span><small id="activeCount"></small></button>
  <button class="navButton" data-view="inbox"><span class="navicon" aria-hidden="true">▤</span><span data-label="inbox"></span><small id="inboxCount"></small></button>
  <button id="hiddenDrop" class="navButton" data-view="hidden"><span class="navicon" aria-hidden="true">⊟</span><span data-label="hidden"></span><small id="hiddenCount"></small></button>
  <button class="navButton" data-view="excluded"><span class="navicon" aria-hidden="true">⊘</span><span data-label="excluded"></span><small id="excludedCount"></small></button>
+ <button class="navButton" data-view="trash"><span class="navicon trashIcon" aria-hidden="true"></span><span data-label="trash"></span><small id="trashCount"></small></button>
+ <button class="navButton" id="jumpToChat" type="button" data-label="mainChat"></button>
 </nav>
 <div class="projects"><p class="sectionlabel" data-label="projects"></p><div id="projectList"></div></div>
 <div class="utilities"><button id="connections">◌ <span data-label="connections"></span></button><button id="addGroup">＋ <span data-label="newGroup"></span></button><div class="locale" id="localePicker" role="group" aria-label="Language"><button lang="en" data-lang="en">English</button><button lang="ko" data-lang="ko">한국어</button></div><p class="sample" id="statusline"></p></div></aside>
-<main><p class="breadcrumb"><b style="font-weight:inherit" data-label="workspace"></b> <span>/</span> <b style="font-weight:inherit" data-label="myWork"></b><b id="projectTrail" style="font-weight:inherit"></b></p><div class="intro"><div><h1 id="heading"></h1><p class="meta" id="summary"></p></div><div class="viewTools"><label class="visibilityFilter" id="visibilityFilter" hidden><input type="checkbox" id="showHidden"><span data-label="showHidden"></span></label><button class="tool" id="viewAction"></button></div></div><section id="canvas"></section><p class="hint" id="hint"></p></main>
-<aside class="side" id="chatPanel"><div class="sidehead"><h2 data-label="mainChat"></h2><small id="activeScope"></small></div><div class="chat" id="chat" role="log" aria-live="polite"></div>
-<form class="composer" id="composer"><div class="dest" id="dest"></div><div class="inputbox"><label for="prompt" data-label="message"></label><textarea id="prompt"></textarea><div class="composefoot"><select id="mode" aria-label="Message mode"><option value="auto">Auto</option><option value="find">Find</option><option value="send">Send</option></select><button class="send" type="submit"><span data-label="send"></span> ↑</button></div></div></form></aside>
-</div><dialog id="dialog" aria-labelledby="dialogTitle"><div class="row"><h2 id="dialogTitle"></h2><button class="tool" id="closeDialog" data-label="close"></button></div><div id="dialogContent"></div></dialog><div class="toast" id="toast" role="status"></div><div id="projectDropPreview" role="status"></div>
+<main><p class="breadcrumb"><b style="font-weight:inherit" data-label="workspace"></b> <span>/</span> <b style="font-weight:inherit" data-label="myWork"></b><b id="projectTrail" style="font-weight:inherit"></b></p><div class="intro"><div><h1 id="heading"></h1><p class="meta" id="summary"></p></div><div class="viewTools"><label class="visibilityFilter" id="visibilityFilter" hidden><input type="checkbox" id="showHidden"><span data-label="showHidden"></span></label><button class="tool" id="viewAction"></button></div></div>
+<section id="folderSetupPrompt" class="folderSetupPrompt" hidden>
+ <div><h2 data-label="projectFolders"></h2><p class="sub" data-label="setupIntro"></p></div>
+ <div class="folderSetupActions"><button class="send" id="openFolderSetup" data-label="setupFolders"></button><button class="tool" id="skipFolderSetup" data-label="skipSetup"></button></div>
+</section>
+<div id="borderLegend" class="borderLegend" hidden>
+ <ul role="list">
+  <li class="unreadReply"><span class="borderSwatch" aria-hidden="true"></span><span data-label="redBorder"></span></li>
+  <li class="newThread"><span class="borderSwatch" aria-hidden="true"></span><span data-label="blueBorder"></span></li>
+ </ul>
+ <p data-label="borderOrder"></p>
+</div>
+<div id="rootTodoBar" class="rootTodoBar" hidden>
+ <button id="rootTodoButton" class="projectTodoButton" type="button" data-todo-memo="" aria-expanded="false">
+  <span class="projectTodoIcon" aria-hidden="true"></span><span data-label="allTodos"></span><small id="rootTodoCount" aria-hidden="true" hidden></small>
+ </button>
+</div>
+<div id="todoTools" class="todoTools" hidden>
+ <label class="todoScope"><span data-label="showProjects"></span><select id="todoScope"></select></label>
+ <form id="todoForm" class="todoForm">
+  <label id="todoDestination"><span data-label="project"></span><select id="todoProject" required></select></label>
+  <label class="todoInput"><span data-label="todo"></span><input id="todoText" maxlength="400" required autocomplete="off"></label>
+  <button id="addTodo" class="send" type="submit" data-label="addTodo"></button>
+ </form>
+</div><section id="canvas"></section><p class="hint" id="hint"></p></main>
+<aside class="side" id="chatPanel" aria-labelledby="chatHeading"><div class="sidehead"><h2 id="chatHeading" data-label="mainChat"></h2></div>
+<div class="chatViews">
+ <button type="button" data-chat-view="activity" aria-controls="activity" aria-pressed="true" data-label="activity"></button>
+ <button type="button" data-chat-view="conversation" aria-controls="chat" aria-pressed="false" data-label="conversation"></button>
+</div>
+<section id="activity" class="activity">
+ <div class="activityFilters">
+  <label><span data-label="source"></span><select id="activitySource"></select></label>
+  <label><span data-label="thread"></span><select id="activityThread"></select></label>
+ </div>
+ <div class="activityFeed" id="activityFeed"></div>
+</section>
+<div class="chat" id="chat" role="log" aria-live="polite" hidden></div>
+<form class="composer" id="composer">
+ <label class="chatTarget"><span data-label="destination"></span><select id="chatTarget"></select></label>
+ <div class="dest" id="dest"></div>
+ <div class="inputbox"><label for="prompt" data-label="message"></label><textarea id="prompt"></textarea><div class="composefoot"><select id="mode" aria-label="Message mode"><option value="auto">Auto</option><option value="find">Find</option><option value="send">Send</option></select><button class="send" type="submit"><span data-label="send"></span> ↑</button></div></div>
+</form></aside>
+</div><dialog id="dialog" aria-labelledby="dialogTitle"><div class="row"><h2 id="dialogTitle"></h2><button class="tool" id="closeDialog" data-label="close"></button></div><div id="dialogContent"></div></dialog>
+<div class="notices"><div class="toast" id="toast" role="status"></div><button id="undoWorkspace" class="undoControl" type="button" disabled><span aria-hidden="true">↶</span><span data-label="undo"></span><small id="undoCount" aria-hidden="true">0</small></button></div><div id="projectDropPreview" role="status"></div>
 <script type="module" src="/app.js"></script></body></html>
