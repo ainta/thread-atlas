@@ -318,7 +318,10 @@ def application(s):
                 value=s.snapshot(int(req.query['after']) if 'after' in req.query else None)
                 provider,session=req.query.get('activity_provider'),req.query.get('activity_thread')
                 if provider or session:value['activity']=s.store.recent_replies(provider or None,session or None)
-            elif action=='history':value=s.store.history(req.query['id'],int(req.query['seq']) if 'seq' in req.query else None)
+            elif action=='history':
+                seq=req.query.get('seq')
+                if seq is not None and not re.fullmatch(r'[1-9][0-9]{0,18}',seq):raise ValueError('Invalid message number')
+                value=s.store.history(req.query['id'],seq)
             elif action=='search':value=s.store.search(req.query.get('q',''),req.query.get('provider') or None)
             elif action=='reply':
                 seq=req.query.get('seq','')

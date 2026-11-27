@@ -504,8 +504,10 @@ function renderChatControls(){
   $('activityFeed').innerHTML=html;
  }
 }
-function plan(text,hits){return route(text,state.sessions,focus,$('mode').value,locked,hits);}
-async function search(q){const provider=named(q),hits=await api('search?q='+encodeURIComponent(q)+(provider?'&provider='+encodeURIComponent(provider):''));if(q===$('prompt').value.trim())found={q,hits};return hits;}
+// `at` is the reply target and mode a request was made with, so a later change cannot redirect it.
+function plan(text,hits,at={focus,mode:$('mode').value,locked}){return route(text,state.sessions,at.focus,at.mode,at.locked,hits);}
+// Only the start of a long draft is searched, which keeps the request within the server's URL limit.
+async function search(q){const provider=named(q),hits=await api('search?q='+encodeURIComponent(q.slice(0,500))+(provider?'&provider='+encodeURIComponent(provider):''));if(q===$('prompt').value.trim())found={q,hits};return hits;}
 const eligible=i=>Boolean(i)&&!i.hidden&&matchable(state.sessions).includes(i);
 const noActiveMatch=()=>!state.sessions.some(isActiveThread)?l('No matching thread. Choose a destination.','일치하는 스레드가 없습니다. 보낼 곳을 선택하세요.'):l('No matching active thread. Mark a thread or folder Active, or choose a destination.',
  '일치하는 진행 중 스레드가 없습니다. 스레드나 폴더를 진행 중으로 표시하거나 보낼 곳을 선택하세요.');
@@ -529,7 +531,8 @@ function renderChat(){
  const html=messages.map((m,n)=>{
   if(m.kind==='user')return '<div class="utter">'+escape(m.body)+'</div>';
   let h='';
-  if(m.kind==='source')h='<b>'+escape(m.path)+'</b>'+(m.match?'<div class="quote"><span class="sub">'+l('Matched message','일치한 메시지')+' · '+stamp(m.match.at)+'</span><p>'+escape(m.match.snippet)+'</p><button class="linkbtn" data-card="'+m.session+'" data-seq="'+m.match.seq+'">'+l('View source','원문 보기')+' ↗</button></div>':'')+'<div class="quote"><span class="sub">'+escape(m.provider)+' · '+stamp(m.at)+'</span><p>'+escape(m.body)+'</p><button class="linkbtn" data-card="'+m.session+'">'+l('View source','원문 보기')+' ↗</button></div>';
+  const quote=(label,at,body,seq)=>'<div class="quote"><span class="sub">'+label+' · '+stamp(at)+'</span><p>'+escape(body)+'</p><button class="linkbtn" data-card="'+m.session+'"'+(seq?' data-seq="'+seq+'"':'')+'>'+l('View source','원문 보기')+' ↗</button></div>';
+  if(m.kind==='source')h='<b>'+escape(m.path)+'</b>'+(m.match?quote(escape(m.provider)+' · '+l('Matched message','일치한 메시지'),m.match.at,m.match.snippet,m.match.seq):'')+(m.match?.latest?'':quote(escape(m.provider),m.at,m.body));
   if(m.kind==='choose'){
    const candidates=m.ids.map(item).filter(i=>m.chosen?i?.id===m.chosen&&!i.hidden:eligible(i));
    h=candidates.length?l('Which thread did you mean?','어느 스레드인가요?')+'<div class="replyopts">'+candidates.map(i=>
@@ -955,7 +958,7 @@ async function queueReply(i,body,key,activeOnly=false){
 async function handle(i,body,action,key,explicit=false,match=null){
  if(!i||i.hidden)throw Error(l('Session unavailable','세션을 사용할 수 없습니다'));
  if(!explicit&&!eligible(i))throw Error(noActiveMatch());
- if(!action){if(!locked)pin(i.id,false);push({kind:'source',session:i.id,path:path(i),provider:i.provider,at:i.latest_at,body:i.latest||l('No assistant reply yet.','아직 답변이 없습니다.'),match:match&&!match.latest?match:null});return;}
+ if(!action){if(!locked)pin(i.id,false);push({kind:'source',session:i.id,path:path(i),provider:i.provider,at:i.latest_at,body:i.latest||l('No assistant reply yet.','아직 답변이 없습니다.'),match});return;}
  if(!i.direct){push({kind:'readonly',path:path(i),session:i.id,body});return;}
  await queueReply(i,body,key,!explicit);if(!locked)pin(i.id,false);await refresh(true);
 }
@@ -964,8 +967,9 @@ $('composer').onsubmit=async e=>{
  const key=draftID||crypto.randomUUID();draftID=key;save('draftID',key);
  const submit=$('composer').querySelector('[type=submit]');if(submit.disabled)return;submit.disabled=true;
  try{setChatView('conversation');
+  const at={focus,mode:$('mode').value,locked},pinned=plan(body,[],at);
   // Routing still works from titles and latest replies when full-history search is unavailable.
-  const hits=await search(body).catch(()=>[]),p=plan(body,hits),match=id=>hits.find(f=>f.session===id);
+  const hits=at.locked&&pinned.action&&pinned.candidates[0]?.id===at.focus?[]:await search(body).catch(()=>[]),p=plan(body,hits,at),match=id=>hits.find(f=>f.session===id);
   if(!messages.some(m=>m.kind==='user'&&m.key===key))push({kind:'user',body,key});
   if(!p.candidates.length)push({kind:'info',body:noActiveMatch()});
   else if(p.candidates.length===1&&!p.waiting&&!p.confirm)await handle(p.candidates[0],body,p.action,key,p.explicit,match(p.candidates[0].id));

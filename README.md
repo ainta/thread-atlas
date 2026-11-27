@@ -84,7 +84,7 @@ In the right panel, use **Activity** to filter replies by source or thread. Choo
 | **Send to thread** with **Match active threads** | “Summarize the payment retry tests.” |
 | **Send to thread** with a specific **Destination** | Select **Payment retry policy** and type “Try a backoff of 500 ms.” |
 
-**Auto** chooses between finding and sending. Thread Atlas matches titles, project names, recent replies, and every stored message, then previews the destination. It asks you to choose when the match is unclear, and asks before sending to a thread that only an older message matched. When **Find** matched an older message, the answer shows it with its time, and **View source** opens the history at that message. A specific destination can be any visible thread.
+**Auto** chooses between finding and sending. Thread Atlas matches titles, project names, recent replies, and every stored message, then previews the destination. It asks you to choose when the match is unclear, and asks before sending to a thread that only an older message matched. When **Find** matched a stored message, the answer shows it with its time, next to the latest reply when they differ, and **View source** opens the history at that message. A specific destination can be any visible thread.
 
 ![Main chat showing a found reply and the destination preview for a follow-up](docs/main-chat.png)
 
@@ -115,7 +115,7 @@ uv run playwright install chromium
 uv run python scripts/browser_test.py
 ```
 
-The browser suite runs in an isolated Chromium profile with fixture pages for the web providers. The opt-in live suite uses authenticated providers, creates four disposable conversations, and consumes model usage.
+The browser suite runs in an isolated Chromium profile with fixture pages for the web providers. Name full-history steps as arguments, for example `uv run python scripts/browser_test.py older_match_choices`, to run only those after the shared checks. The opt-in live suite uses authenticated providers, creates four disposable conversations, and consumes model usage.
 
 ```sh
 uv run python scripts/live_test.py --live
