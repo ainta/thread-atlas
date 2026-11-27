@@ -1,8 +1,10 @@
 """Incrementally index user-visible text. File offsets commit with the messages."""
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
+from zipfile import BadZipFile, ZipFile
 
 from .store import ident
 
@@ -19,6 +21,17 @@ def plain(content):
     return '\n'.join(str(v.get('text') or '') for v in content if isinstance(v,dict) and str(v.get('type','')).lower() in ('text','input_text','output_text'))
 
 
+def codex_message(item):
+    kind = item.get("type", "").lower()
+    if kind not in ("usermessage", "agentmessage") or item.get("phase") == "commentary":
+        return None
+    body = plain(item.get("content")) or item.get("text", "")
+    if not isinstance(body, str) or not body.strip() or body.lstrip().startswith(
+            ("<environment_context>", "<local-command", "<INSTRUCTIONS>")):
+        return None
+    return ("user" if kind == "usermessage" else "assistant"), body
+
+
 def consume(store,j,meta,kind,path,offset):
     typ=j.get("type")
     ts=epoch(j.get("timestamp"))
@@ -27,7 +40,7 @@ def consume(store,j,meta,kind,path,offset):
         if typ=="session_meta":
             cwd=p.get("cwd","");source=p.get("id") or p.get("session_id")
             if source:
-                meta['sid']=store.session(kind,p.get('creator_account_id') or 'local',source,Path(cwd).name,cwd=cwd)
+                meta['sid']=store.session(kind,p.get('creator_account_id') or 'local',source,cwd=cwd)
             return
         sid=meta.get('sid')
         if not sid:return
@@ -37,11 +50,11 @@ def consume(store,j,meta,kind,path,offset):
                 state='run' if tag=='task_started' else 'idle'
                 store.db.execute("UPDATE sessions SET state=? WHERE id=?",(state,sid))
             if tag=='item_completed':
-                item=p.get('item',{}); it=item.get('type','').lower()
-                if it in ('usermessage','agentmessage') and item.get('phase')!='commentary':
-                    body=plain(item.get('content')); role='user' if it=='usermessage' else 'assistant'
-                    if body and not body.lstrip().startswith(('<environment_context>','<local-command','<INSTRUCTIONS>')):
-                        store.message(sid,item.get('id') or ident(ts,body),role,body,ts)
+                item=p.get('item',{})
+                message=codex_message(item)
+                if message:
+                    role,body=message
+                    store.message(sid,item.get('id') or ident(ts,body),role,body,ts)
                 meta['modern']=True
             elif tag in ('user_message','agent_message') and not meta.get('modern'):
                 body=p.get('message','')
@@ -50,7 +63,7 @@ def consume(store,j,meta,kind,path,offset):
     if typ not in ('assistant','user','custom-title') or j.get('isSidechain') or j.get('isMeta'):return
     if not meta.get('sid'):
         source=j.get('sessionId') or path.stem;cwd=j.get('cwd') or ''
-        meta['sid']=store.session(kind,'local',source,Path(cwd).name,cwd=cwd)
+        meta['sid']=store.session(kind,'local',source,cwd=cwd)
     sid=meta['sid']
     if typ=='custom-title':
         store.db.execute("UPDATE sessions SET title=? WHERE id=?",(str(j.get('customTitle',''))[:240],sid));return
@@ -101,10 +114,10 @@ def scan(store,codex_dir,claude_dir):
 
 def import_conversation(store,provider,account,c):
     uid=c.get('conversation_id') or c.get('uuid') or c.get('id')
-    if not isinstance(uid,str) or not uid or not all(ch.isalnum() or ch in '-_' for ch in uid):return 0
+    if not isinstance(uid,str) or not uid or not all(ch.isalnum() or ch in '-_' for ch in uid):return None
     if provider=='ChatGPT':
         mapping=c.get('mapping')
-        if not isinstance(mapping,dict):return 0
+        if not isinstance(mapping,dict):return None
         tip=c.get('current_node');visited=set();batch=[]
         while tip in mapping and tip not in visited:
             visited.add(tip);node=mapping[tip];batch.append(node);tip=node.get('parent')
@@ -117,28 +130,89 @@ def import_conversation(store,provider,account,c):
         url='https://chatgpt.com/c/'+uid
     else:
         batch=c.get('chat_messages')
-        if not isinstance(batch,list):return 0
+        if not isinstance(batch,list):return None
         msgs=[(m.get('uuid'),{'human':'user','assistant':'assistant'}.get(m.get('sender')),m.get('text') or plain(m.get('content')),epoch(m.get('created_at'))) for m in batch]
         url='https://claude.ai/chat/'+uid
-    sid=store.session(provider,account,uid,provider+' · '+account,str(c.get('title') or c.get('name') or ''),url=url)
+    new_chat = store.db.execute("SELECT 1 FROM sessions WHERE id=?", (ident(provider, account, uid),)).fetchone() is None
+    user_prompts = (body for _, role, body, _ in msgs if role == 'user')
+    sid=store.session(provider,account,uid,title=str(c.get('title') or c.get('name') or ''),url=url,user_prompts=user_prompts)
     seen={}
+    new_messages = 0
     for n,(source,role,body,at) in enumerate(msgs):
-        store.merge_message(sid,source or ident(n,role,body,at),role,body,at,True,seen,False)
-    store.finish_batch(sid,seen)
-    return 1
+        if store.merge_message(sid,source or ident(n,role,body,at),role,body,at,True,seen,False):
+            new_messages += 1
+    store.finish_batch(sid,seen,mark_reply=not new_chat)
+    return new_chat, new_messages
 
 
 def import_export(store,provider,account,data):
+    return import_export_report(store, provider, account, data)["count"]
+
+
+def import_export_report(store, provider, account, data):
     if provider not in ('ChatGPT','Claude') or not isinstance(account,str) or not account.strip():raise ValueError('Choose a provider and account label')
     if isinstance(data,dict):data=data.get('conversations')
     if not isinstance(data,list):raise ValueError('Expected conversations.json containing an array')
-    chats=[c for c in data if isinstance(c,dict)];count=0
+    account = account.strip()
+    chats = [c for c in data if isinstance(c, dict)]
+    count = new_chats = new_messages = 0
     # Short transactions keep the dashboard and the dispatcher writable during a large import. Known messages are
     # skipped on a later import, so a partly applied file can simply be imported again.
     for start in range(0,len(chats),25):
         with store.tx():
             for c in chats[start:start+25]:
-                try:count+=import_conversation(store,provider,account.strip(),c)
-                except (AttributeError,TypeError,KeyError,ValueError):continue
+                try:
+                    imported = import_conversation(store, provider, account, c)
+                except (AttributeError, TypeError, KeyError, ValueError):
+                    continue
+                if imported is not None:
+                    added_chat, added_messages = imported
+                    count += 1
+                    new_chats += added_chat
+                    new_messages += added_messages
     if not count:raise ValueError('No compatible conversations found')
-    return count
+    return {"count": count, "new_chats": new_chats, "new_messages": new_messages}
+
+
+def read_export_archive(archive):
+    members = [item for item in archive.infolist() if re.fullmatch(
+        r"conversations(?:[-_]?[0-9]+)?\.json", Path(item.filename).name, re.IGNORECASE
+    )]
+    if not members or sum(item.file_size for item in members) > 256 * 1024**2:
+        raise ValueError("Missing or oversized conversations JSON in ZIP")
+    conversations = []
+    for item in members:
+        batch = json.loads(archive.read(item))
+        if isinstance(batch, dict):
+            batch = batch.get("conversations")
+        if not isinstance(batch, list):
+            raise ValueError("Invalid export file")
+        conversations.extend(batch)
+    return conversations
+
+
+def refresh_chatgpt_downloads(store, downloads, account):
+    if not isinstance(account, str) or not account.strip():
+        raise ValueError("Enter a ChatGPT account label")
+    candidates = []
+    try:
+        for path in downloads.iterdir():
+            if path.suffix.lower() == ".zip" and not path.is_symlink() and path.is_file():
+                try:
+                    candidates.append((path.stat().st_mtime_ns, path))
+                except FileNotFoundError:
+                    continue
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ValueError("Thread Atlas could not read the downloads folder") from error
+
+    for _, path in sorted(candidates, reverse=True):
+        try:
+            with ZipFile(path) as archive:
+                conversations = read_export_archive(archive)
+        except (BadZipFile, OSError, RuntimeError, ValueError):
+            continue
+        if any(isinstance(chat, dict) and isinstance(chat.get("mapping"), dict) for chat in conversations):
+            return {"file": path.name, **import_export_report(store, "ChatGPT", account, conversations)}
+    return None

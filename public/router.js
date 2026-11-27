@@ -1,9 +1,12 @@
-// Scores distinctive terms across the visible workspace. A near tie requires a choice.
+// Scores distinctive terms across active threads, or every visible thread while none is Active. A near tie requires a choice.
 const stops=new Set(('the a an to on for at in my me this that from with it is was are be yesterday please work thread status latest then what where did we leave can you should run set change show find update policy project session 계속 오늘 어제 어디까지 상태 확인 현재 부탁 좀 해줘 알려줘 진행해 작업').split(' '));
 function words(text){
   const raw=String(text||'').toLowerCase().normalize('NFKC').match(/[\p{L}\p{N}]+/gu)||[];
   return [...new Set(raw.map(w=>w.replace(/^(.{2,}?)(에서|에게|으로|에는|에서의|의|에|을|를|는|은|이|가|로|까지)$/u,'$1').replace(/^([a-z]{3,})ies$/,'$1y').replace(/^([a-z]{3,})s$/,'$1')).filter(w=>w.length>1&&!stops.has(w)))];
 }
+export const isActiveThread=thread=>thread?.effective_status==='active'&&!thread.hidden;
+// Until a thread or folder is marked Active, every visible thread can be matched, as before workspace statuses.
+export const matchable=items=>{const active=items.filter(isActiveThread);return active.length?active:items.filter(i=>i&&!i.hidden);};
 // The provider a request names, if any. Routing and full-history search are both limited to it.
 export function named(text){
   return [['Claude Code',/claude\s*code|클로드\s*코드/i],['ChatGPT',/chatgpt|챗지피티/i],['Codex',/codex|코덱스/i],['Claude',/claude|클로드/i]].find(([,r])=>r.test(text))?.[0];
@@ -11,16 +14,16 @@ export function named(text){
 // `found` holds full-history search results: the best-matching message of each session and the query terms it
 // contains, as returned by /api/search.
 export function route(text,items,focus,mode='auto',locked=false,found=[]){
-  const visible=items.filter(i=>!i.hidden);
   const waiting=/waiting (?:on|for) (?:me|my)|need(?:s)? (?:my|a) reply|awaiting my reply|내 (답변|답장).*기다|답변.*대기/i.test(text);
   const lookup=/^(?:find|show|where|what happened|what is|what.s|which|how far|any updates|status\b)|어디|찾아|최근|상태.*알려|어떻게 됐/i.test(text.trim());
   const action=mode==='send'||(mode==='auto'&&!waiting&&!lookup);
-  if(mode!=='send'&&waiting)return {action:false,candidates:visible.filter(i=>i.state==='wait'),waiting:true};
   // An explicit reply target wins over any provider name the message happens to mention.
-  const pinned=visible.find(i=>i.id===focus);
-  if(locked&&pinned&&action)return {action,candidates:[pinned]};
+  const pinned=locked&&action&&items.find(i=>i.id===focus&&!i.hidden);
+  if(pinned)return {action,candidates:[pinned],explicit:true};
+  const active=matchable(items);
+  if(mode!=='send'&&waiting)return {action:false,candidates:active.filter(i=>i.state==='wait'),waiting:true};
   const provider=named(text);
-  const pool=visible.filter(i=>!provider||i.provider===provider);
+  const pool=provider?active.filter(i=>i.provider===provider):active;
   const selected=pool.find(i=>i.id===focus);
   const query=words(text);
   const generic=new Set('then test regression first again next 하나 다시 테스트 회귀 먼저'.split(' '));

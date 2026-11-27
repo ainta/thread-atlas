@@ -9,7 +9,7 @@ const terms=[
 // With history, an older message in the neighbouring thread also contains the topic's terms, and the ambiguous requests
 // appear word for word in the older messages of two threads.
 for(const history of [false,true])for(const lang of [0,1]){
- const items=terms.map((pair,id)=>({id:String(id),title:(lang?'검토 ':'Review ')+pair[lang],latest:lang?pair[lang]+' 변경이 준비되었습니다.':'The next change concerns '+pair[lang]+'.',project:'Platform',state:'idle'}));
+ const items=terms.map((pair,id)=>({id:String(id),title:(lang?'검토 ':'Review ')+pair[lang],latest:lang?pair[lang]+' 변경이 준비되었습니다.':'The next change concerns '+pair[lang]+'.',project:'Platform',state:'idle',effective_status:'active'}));
  let correct=0,wrong=0,asked=0;
  for(let n=0;n<50;n++){
   const id=(n*7)%20,term=terms[id][lang];
@@ -25,27 +25,43 @@ for(const history of [false,true])for(const lang of [0,1]){
   assert.ok(route(text,items,null,'auto',false,history?['3','11'].map(session=>({session,seq:1,at:1,terms:text.toLowerCase().split(' ')})):[]).candidates.length>1);
  console.log((lang?'Korean':'English')+' synthetic routing'+(history?' with older matches':'')+': '+correct+'/50 correct, '+wrong+' wrong, '+asked+' prompted; 10/10 ambiguous prompted');
 }
-const duplicates=[0,1].map(id=>({id,title:'Refund policy',latest:'Update the limit',project:'Work'}));
+const duplicates=[0,1].map(id=>({id,title:'Refund policy',latest:'Update the limit',project:'Work',effective_status:'active'}));
 assert.equal(route('Update refund policy',duplicates,null).candidates.length,2);
 assert.equal(route('Where did we leave the refund policy?',duplicates,null).action,false);
 assert.equal(route('Go ahead',duplicates,0,'send',true).candidates[0].id,0);
-const tests=[{id:'origin',title:'Login bug',latest:'Fixed.',project:'Auth'},
- {id:'other',title:'Regression tests',latest:'Run the tests.',project:'Other'}];
+const tests=[{id:'origin',title:'Login bug',latest:'Fixed.',project:'Auth',effective_status:'active'},
+ {id:'other',title:'Regression tests',latest:'Run the tests.',project:'Other',effective_status:'active'}];
 assert.equal(route('Then run the tests',tests,'origin').candidates[0].id,'origin');
 assert.equal(route('Update regression tests',tests,'origin').candidates[0].id,'other');
 // A pinned reply target is not replaced because the message names another provider.
-const mixed=[{id:'pinned',provider:'Codex',title:'Payment retry policy',latest:'Retry budget is 3.',project:'payments'},
- {id:'other',provider:'Claude Code',title:'Compare billing exports',latest:'Done comparing.',project:'billing'}];
+const mixed=[{id:'pinned',provider:'Codex',title:'Payment retry policy',latest:'Retry budget is 3.',project:'payments',effective_status:'active'},
+ {id:'other',provider:'Claude Code',title:'Compare billing exports',latest:'Done comparing.',project:'billing',effective_status:'active'}];
 assert.equal(route('compare with what claude code suggested and proceed',mixed,'pinned','send',true).candidates[0].id,'pinned');
 assert.equal(route('rewrite this so claude can follow it',mixed,'pinned','send',true).candidates[0].id,'pinned');
 // A single incidental word, or being the only thread, asks for confirmation before sending.
-const crowd=Array.from({length:40},(_,n)=>({id:'s'+n,provider:'Codex',title:'Topic '+n,latest:'Reply about item'+n+'.',project:'p'+n%5}));
+const crowd=Array.from({length:40},(_,n)=>({id:'s'+n,provider:'Codex',title:'Topic '+n,latest:'Reply about item'+n+'.',project:'p'+n%5,effective_status:'active'}));
 crowd[17].latest='I rotated the quarterly credentials.';
 const weak=route('Draft an email to finance about the quarterly numbers',crowd,null);
 assert.deepEqual([weak.candidates.length,weak.candidates[0].id,weak.confirm],[1,'s17',true]);
 assert.equal(route('Book a dentist appointment',[mixed[0]],null).confirm,true);
 assert.equal(route('Update the payment retry budget',mixed,null).confirm,undefined);
 assert.equal(route('Where is the quarterly rotation?',crowd,null).confirm,undefined);
+
+const matching=[{...mixed[0],state:'wait',effective_status:'default'},
+ {...mixed[1],state:'wait',workspace_status:'default'},
+ {...mixed[0],id:'hidden',hidden:true,effective_status:'hidden',state:'wait'},
+ {...mixed[0],id:'excluded',hidden:true,effective_status:'excluded',state:'wait'}];
+for (const mode of ['auto','find','send']){
+ const matched=route('Compare the billing exports and payment retry policy',matching,null,mode);
+ assert.deepEqual(matched.candidates.map(thread=>thread.id),['other']);
+ assert.deepEqual(route('Payment retry policy on Codex',matching,'pinned',mode).candidates,[]);
+}
+assert.deepEqual(route('Which threads need my reply?',matching,null).candidates.map(thread=>thread.id),['other']);
+// While no thread is Active, every visible thread can be matched; hidden and excluded ones still cannot.
+assert.deepEqual(route('Then run the tests',matching.slice(0,1),'pinned').candidates.map(thread=>thread.id),['pinned']);
+assert.deepEqual(route('Payment retry policy',[matching[0],matching[2],matching[3]],null).candidates.map(thread=>thread.id),['pinned']);
+assert.equal(route('Then run the tests',matching,'pinned','send',true).explicit,true);
+assert.equal(route('Then run the tests',matching,'pinned','send',true).candidates[0].id,'pinned');
 // Two threads whose older messages match equally are offered as candidates, not sent to one of them.
 const older=[{id:'a',provider:'Codex',title:'Billing sync',latest:'Updated the CSV headers.',project:'Work'},
  {id:'b',provider:'Codex',title:'Invoice export',latest:'Renamed the columns.',project:'Work'},

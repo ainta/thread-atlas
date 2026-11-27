@@ -126,6 +126,17 @@ class SearchTests(unittest.TestCase):
         atlas.post('/api/edit',{'id':sid,'hidden':True})
         self.assertEqual(atlas.search('quarterly credentials'),[])
 
+    def test_search_excludes_trashed_and_folder_hidden_sessions(self):
+        atlas=self.start()
+        trashed=atlas.thread('ledger','Ledger notes',('human','Reconcile the escrow ledger.'),('assistant','Done.'))
+        foldered=atlas.thread('escrow','Escrow notes',('human','Escrow ledger signed off.'),('assistant','Filed.'))
+        self.assertEqual(sorted(f['session'] for f in atlas.search('escrow ledger')),sorted([trashed,foldered]))
+        atlas.post('/api/trash-session',{'id':trashed,'trashed':True})
+        self.assertEqual([f['session'] for f in atlas.search('escrow ledger')],[foldered])
+        group=next(i for i in atlas.get('state')['sessions'] if i['id']==foldered)['group_id']
+        atlas.post('/api/group-status',{'id':group,'workspace_status':'hidden'})
+        self.assertEqual(atlas.search('escrow ledger'),[])
+
     def test_existing_database_is_migrated_and_backfilled_once(self):
         self.data.mkdir()
         with closing(sqlite3.connect(self.data/'atlas.sqlite')) as db,db:
@@ -160,7 +171,7 @@ class SearchTests(unittest.TestCase):
     def test_search_keeps_threads_behind_a_busy_one(self):
         self.start().stop()
         with closing(sqlite3.connect(self.data/'atlas.sqlite')) as db,db:
-            db.execute("INSERT INTO groups VALUES('g','Books')")
+            db.execute("INSERT INTO groups(id,name) VALUES('g','Books')")
             db.executemany("INSERT INTO sessions(id,provider,account,source,title,group_id) VALUES(?,'Claude','Books',?,?,'g')",
                            [(n,n,n.title()) for n in ('busy','quiet','other','notes')])
             db.executemany("INSERT INTO messages(session,source_id,role,body,at,alert) VALUES('notes',?,'user',?,?,0)",
@@ -183,7 +194,7 @@ class SearchTests(unittest.TestCase):
         # Words like these turn up in most messages of a coding project.
         vocabulary+=['test','error','code','file']*200
         with closing(sqlite3.connect(self.data/'atlas.sqlite')) as db,db:
-            db.execute("INSERT INTO groups VALUES('g','Load')")
+            db.execute("INSERT INTO groups(id,name) VALUES('g','Load')")
             db.executemany("INSERT INTO sessions(id,provider,account,source,title,group_id) VALUES(?,'Claude','Load',?,?,'g')",
                            [('s'+str(n),'s'+str(n),'Load '+str(n)) for n in range(1000)])
             db.executemany("INSERT INTO messages(session,source_id,role,body,at,alert) VALUES(?,?,?,?,?,0)",
