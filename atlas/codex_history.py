@@ -78,7 +78,8 @@ async def import_codex_history(store, rpc):
             if not messages:
                 return "failed", 0
             return await asyncio.to_thread(save_history, store, thread, messages)
-        except (RuntimeError, aiohttp.ClientError, asyncio.TimeoutError):
+        # A thread with records this version does not recognise is counted as failed instead of ending the import.
+        except (RuntimeError, aiohttp.ClientError, asyncio.TimeoutError, KeyError, TypeError, AttributeError):
             return "failed", 0
 
     async for page in pages(rpc, "thread/list", {"limit": 100}):

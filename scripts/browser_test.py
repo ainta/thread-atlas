@@ -2,12 +2,14 @@
 import io
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, expect
@@ -45,6 +47,137 @@ def exported_chat(key, title, *replies):
         }}
         parent = node
     return {'conversation_id': key, 'title': title, 'current_node': parent, 'mapping': mapping}
+def activate(page,origin,*names):
+    """Earlier steps leave other threads Active, so a step marks the threads it imports Active to have them matched."""
+    sessions=page.request.get(origin+'/api/state').json()['sessions']
+    for name in names:
+        sid=next(i['id'] for i in sessions if i['title']==name)
+        assert page.request.post(origin+'/api/edit',data={'id':sid,'workspace_status':'active'}).ok
+
+
+def full_history_lookup(page,origin):
+    """A lookup finds a thread by an older message, shows it with its time, and View source opens the history there."""
+    # The live fixture titled 'Payment retry policy' would match by title. Hiding it leaves only the older message to match.
+    titled=next(i for i in page.request.get(origin+'/api/state').json()['sessions'] if i['title']=='Payment retry policy')
+    assert page.request.post(origin+'/api/edit',data={'id':titled['id'],'hidden':True}).ok
+    older='Agreed payment retry policy: retry failed charges three times with exponential backoff.'
+    thread=[{'uuid':'billing-0','sender':'human','text':older,'created_at':'2025-03-14T12:00:00Z'}]+[
+        {'uuid':'billing-'+str(n),'sender':'assistant' if n%2 else 'human','text':'CSV export step '+str(n)+' is done.',
+         'created_at':'2025-03-15T00:%02d:00Z'%n} for n in range(1,41)]
+    decoy=[{'uuid':'invoice-1','sender':'assistant','text':'The payment button is now green.','created_at':'2025-03-16T00:00:00Z'}]
+    assert page.request.post(origin+'/api/import',data={'provider':'Claude','account':'History','data':[
+        {'uuid':'billing-sync','name':'Billing sync notes','chat_messages':thread},
+        {'uuid':'invoice-layout','name':'Invoice layout','chat_messages':decoy}]}).ok
+    activate(page,origin,'Billing sync notes','Invoice layout')
+    seq=page.request.get(origin+'/api/search?q=payment retry policy').json()[0]['seq']
+    page.locator('[data-view=map]').click();expect(page.locator('.card').filter(has_text='Billing sync notes')).to_have_count(1,timeout=10000)
+    page.locator('#prompt').fill('Where did we leave the payment retry policy?');page.locator('#prompt').press('Enter')
+    answer=page.locator('#chat .answer').last
+    expect(answer).to_contain_text('Billing sync notes');expect(answer).to_contain_text(older)
+    when=datetime.fromtimestamp(datetime.fromisoformat('2025-03-14T12:00:00+00:00').timestamp())
+    expect(answer).to_contain_text(re.compile(rf'{when:%b} {when.day}, {when.hour%12 or 12}:{when:%M}\s?{when:%p}'))
+    answer.locator('[data-seq="%d"]'%seq).click()
+    match=page.locator('#dialog .history section.match')
+    expect(match).to_have_attribute('data-seq',str(seq));expect(match).to_contain_text(older);expect(match).to_be_in_viewport()
+    page.locator('#closeDialog').click()
+
+
+def claude_thread(uuid,name,*messages):
+    """One Claude export conversation, a day per message from April 1, 2025."""
+    return {'uuid':uuid,'name':name,'chat_messages':[{'uuid':uuid+'-'+str(n),'sender':role,'text':text,'created_at':'2025-04-%02dT12:00:00Z'%(n+1)}
+                                                     for n,(role,text) in enumerate(messages)]}
+
+
+def show(page,origin,*threads):
+    assert page.request.post(origin+'/api/import',data={'provider':'Claude','account':'History','data':list(threads)}).ok
+    activate(page,origin,*(t['name'] for t in threads))
+    page.locator('[data-view=map]').click()
+    for t in threads:expect(page.locator('.card').filter(has_text=t['name'])).to_have_count(1,timeout=10000)
+
+
+def ask(page,text):
+    """Submit a request and return the dashboard's answer to it."""
+    page.locator('#prompt').fill(text);page.locator('#prompt').press('Enter')
+    return answer_to(page,text)
+
+
+def answer_to(page,text):
+    answer=page.locator('#chat .utter').filter(has_text=text).last.locator('xpath=following-sibling::div[contains(@class,"answer")][1]')
+    expect(answer).to_have_count(1);return answer
+
+
+def older_match_stays_unread(page,origin,token):
+    """Opening the history at an older matched message leaves the thread's newer reply unread."""
+    older='Agreed tax nexus: register in the three new states by June.'
+    sid=page.request.post(origin+'/bridge/sync',headers={'Authorization':'Bearer '+token},data={
+        'provider':'Claude','account':'Personal','source':'state-filings','tab':'tab-state-filings-0001','title':'State filings',
+        'messages':[{'id':'filing-1','role':'user','text':older,'at':'2025-04-01T12:00:00Z'},
+                    {'id':'filing-2','role':'assistant','text':'Drafted the cover letter.'}]}).json()['session']
+    unread=lambda:next(i for i in page.request.get(origin+'/api/state').json()['sessions'] if i['id']==sid)['unread']
+    activate(page,origin,'State filings')
+    assert unread()
+    page.locator('[data-view=map]').click();expect(page.locator('.card').filter(has_text='State filings')).to_have_count(1,timeout=10000)
+    answer=ask(page,'Where did we leave the tax nexus?');expect(answer).to_contain_text(older)
+    answer.locator('[data-seq]').click();expect(page.locator('#dialog .history section.match')).to_contain_text(older)
+    page.locator('#closeDialog').click()
+    assert unread()
+
+
+def far_apart_terms_route(page,origin):
+    """Routing counts every query word in the matched message, not only the words in its excerpt."""
+    filler=' '.join(['and then we compared every number in the quarterly sheet with the bank export line by line']*4)
+    show(page,origin,claude_thread('month-end','Month-end notes',('human','The ledger '+filler+' cutoff is the 25th.'),('assistant','Archived.')),
+         claude_thread('release-calendar','Release calendar',('human','The cutoff for the release moved to Monday.'),('assistant','Updated.')))
+    answer=ask(page,'Where did we leave the ledger cutoff?')
+    expect(answer).to_contain_text('Month-end notes');expect(answer).not_to_contain_text('Which thread')
+
+
+def latest_reply_identity(page,origin):
+    """The matched message is shown apart from the latest reply exactly when it is a different message."""
+    older='Webhook timeout is now 30 seconds.'
+    filler=' '.join('Paragraph %d lists the folders we moved.'%n for n in range(80))
+    show(page,origin,claude_thread('webhooks','Webhook settings',('human','What should the limit be?'),('assistant',older),('human','Anything else?'),
+                                   ('assistant','Recap: '+older+' I also renamed the queue workers and moved the on-call dashboards.')),
+         claude_thread('archive','Archive notes',('human','Write up the notes.'),('assistant',filler+' The archive retention window is ninety days.')))
+    # An older reply whose text the latest reply repeats is still shown, with its own time and link.
+    answer=ask(page,'Where did we leave the webhook timeout?')
+    expect(answer.locator('.quote')).to_have_count(2);expect(answer.locator('.quote').first).to_contain_text('Matched message')
+    expect(answer.locator('.quote').first).to_contain_text(older);expect(answer.locator('.quote').first.locator('[data-seq]')).to_have_count(1)
+    # A latest reply that matched past the stored cut is shown once.
+    answer=ask(page,'Where did we leave the archive retention window?')
+    expect(answer).to_contain_text('Archive notes');expect(answer.locator('.quote')).to_have_count(1)
+
+
+def older_match_choices(page,origin):
+    """Threads matched only by older messages are offered as choices, never sent to unasked."""
+    cadence='Dunning cadence: reminders go out every three days.'
+    show(page,origin,claude_thread('accounts','Accounts follow-up',('human',cadence),('assistant','Sent the summary.')),
+         claude_thread('customer-mail','Customer emails',('human',cadence),('assistant','Fixed the footer.')),
+         claude_thread('payouts','Vendor payouts',('human','The escheatment threshold is 300 dollars.'),('assistant','Booked.')))
+    page.locator('#prompt').fill('Change the dunning cadence to weekly reminders');expect(page.locator('#dest')).to_contain_text('Choose a destination')
+    page.locator('#prompt').press('Enter');answer=answer_to(page,'Change the dunning cadence to weekly reminders')
+    expect(answer).to_contain_text('Which thread did you mean?');expect(answer.locator('.choice')).to_have_count(2)
+    expect(answer.locator('.choice').filter(has_text='Accounts follow-up')).to_have_count(1);expect(answer.locator('.choice').filter(has_text='Customer emails')).to_have_count(1)
+    page.locator('#prompt').fill('Change the escheatment threshold to 500 dollars');expect(page.locator('#dest')).to_contain_text('Confirm before sending · ')
+    expect(page.locator('#dest')).to_contain_text('Vendor payouts')
+    page.locator('#prompt').press('Enter');answer=answer_to(page,'Change the escheatment threshold to 500 dollars')
+    expect(answer).to_contain_text('Which thread did you mean?');expect(answer.locator('.choice')).to_have_count(1)
+    expect(answer.locator('.choice')).to_contain_text('Vendor payouts')
+
+
+def provider_scoped_lookup(page,origin):
+    """A request that names a provider searches that provider's history, so stronger matches elsewhere cannot crowd it out."""
+    def chatgpt(n):
+        node=lambda key,role,text,parent:{'message':{'id':key,'author':{'role':role},'content':{'parts':[text]},'create_time':1743500000+n},'parent':parent}
+        return {'conversation_id':'vendor-note-'+str(n),'title':'Vendor note '+str(n),'current_node':'b',
+                'mapping':{'a':node('a','user','Escrow audit, escrow audit.',None),'b':node('b','assistant','Escrow audit done.','a')}}
+    assert page.request.post(origin+'/api/import',data={'provider':'ChatGPT','account':'Vendors','data':[chatgpt(n) for n in range(21)]}).ok
+    activate(page,origin,*('Vendor note '+str(n) for n in range(21)))
+    older=('Before the quarter closes we still need to finish the escrow audit, which covers the vendor deposit accounts, '
+           'the clearing balances against the bank statements, and the sign-off from finance.')
+    show(page,origin,claude_thread('quarterly-close','Quarterly close',('human',older),('assistant','Booked the meeting.')))
+    answer=ask(page,'Where did Claude leave the escrow audit?')
+    expect(answer).to_contain_text('Quarterly close');expect(answer).to_contain_text(older)
 
 
 def main():
@@ -110,15 +243,24 @@ def main():
             initial_chat = next(thread for thread in initial_sessions if thread['provider'] == 'ChatGPT')
             group = initial_chat['group_id']
             expect(page.locator('#chatTarget option[value=""]')).to_have_text('Match active threads')
+            # While nothing is Active, every visible thread can be matched.
             page.locator('#prompt').fill('Send to the Authentication review thread')
-            expect(page.locator('#dest')).to_have_text('No matching active thread')
-            page.locator('#prompt').press('Enter')
-            expect(page.locator('#chat')).to_contain_text('No matching active thread')
+            expect(page.locator('#dest')).to_contain_text('Authentication review')
+            # Once another thread is Active, a thread that is not is left out of matching.
+            other_chat = next(thread for thread in initial_sessions if thread['provider'] == 'Claude')
+            assert page.request.post(origin+'/api/edit',data={'id':other_chat['id'],'workspace_status':'active'}).ok
+            page.locator('#prompt').fill('Send to the Authentication review thread again')
+            expect(page.locator('#dest')).to_contain_text('Payment retry policy')
+            expect(page.locator('#dest')).not_to_contain_text('Authentication review')
+            page.locator('#prompt').fill('')
             blocked = page.request.post(origin+'/api/send',data={
                 'id':'inactive-route-fixture','session':initial_chat['id'],'body':'Do not enqueue this fixture','active_only':True,
             })
             assert blocked.status == 400 and 'no longer Active' in blocked.json()['error']
             assert not page.request.get(origin+'/api/state').json()['deliveries']
+            # Undo the status change, so the Undo history the later steps count is unchanged.
+            assert page.request.post(origin+'/api/undo',data={'id':page.request.get(origin+'/api/state').json()['undo']['id']}).ok
+            assert next(t for t in page.request.get(origin+'/api/state').json()['sessions'] if t['id']==other_chat['id'])['workspace_status']=='default'
             assert page.request.post(origin+'/api/group-status',data={'id':group,'workspace_status':'active'}).ok
             expect(page.locator('.card .workspaceBadge')).to_have_count(2)
             for idx,(topic,marker) in enumerate([('Authentication review','ALPHA'),('Payment retry policy','BETA')]):
@@ -716,16 +858,12 @@ def main():
             assert page.evaluate("getComputedStyle(document.documentElement).overflow === 'hidden'")
             messages = chat_dialog.locator('.history')
             assert messages.evaluate('node => node.scrollWidth === node.clientWidth')
+            # The history overflows and scrolls vertically. This is checked directly, because headless Chromium on
+            # Linux delivers wheel scrolling too unevenly to time.
+            assert messages.evaluate("node => getComputedStyle(node).overflowY === 'auto' && node.scrollHeight > node.clientHeight")
+            assert messages.evaluate('node => (node.scrollTop = 0, node.scrollTop = 180, node.scrollTop > 0)')
             messages.hover()
-            messages.evaluate('node => node.scrollTop = 0')
             page.mouse.wheel(300, 0)
-            page.mouse.wheel(0, 180)
-            for _ in range(20):
-                if messages.evaluate('node => node.scrollTop') > 0:
-                    break
-                time.sleep(.05)
-            else:
-                raise AssertionError('Chat history did not scroll vertically')
             assert chat_dialog.evaluate('node => node.scrollLeft') == 0
             assert messages.evaluate('node => node.scrollLeft') == 0
             assert page.evaluate('window.scrollX') == 0
@@ -761,8 +899,14 @@ def main():
             undo.click()
             expect(renamed_card).to_be_visible()
 
+            full_history_lookup(page,origin)
+            older_match_stays_unread(page,origin,token)
+            far_apart_terms_route(page,origin)
+            latest_reply_identity(page,origin)
+            older_match_choices(page,origin)
+            provider_scoped_lookup(page,origin)
             assert not errors,errors
-            ctx.close();print('PASS: browser bridge, incremental imports, routing, drag-and-drop, status, undo, Trash, update filtering, project to-dos, authorization, and responsive layouts with vertical-only chat scrolling.')
+            ctx.close();print('PASS: browser bridge, incremental imports, routing, drag-and-drop, status, undo, Trash, update filtering, project to-dos, authorization, responsive layouts with vertical-only chat scrolling, and full-history lookups and routing.')
         finally:proc.terminate();proc.wait(timeout=20)
 
 

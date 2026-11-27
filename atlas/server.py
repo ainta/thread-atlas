@@ -154,7 +154,9 @@ class Service:
                 return dict(old)
             s=self.store.session_row(sid)
             if s['hidden']:raise ValueError('Session is '+s['effective_status'])
-            if data.get('active_only') is True and s['effective_status']!='active':
+            # A send matched while nothing was Active stays valid until something is marked Active.
+            if data.get('active_only') is True and s['effective_status']!='active' and self.store.db.execute(
+                    "SELECT 1 FROM session_statuses WHERE effective_status='active' LIMIT 1").fetchone():
                 raise ValueError('The matched thread is no longer Active. Choose a destination to reply directly.')
             if s['provider'] in WEB_PROVIDERS and (not s['bridge'] or not s['writable'] or time.time()-s['live_at']>35):raise ValueError('Web thread is offline or read-only')
             if s['provider']=='Codex' and not self.codex_ok:raise ValueError('Codex App Server is offline')
@@ -316,7 +318,8 @@ def application(s):
                 value=s.snapshot(int(req.query['after']) if 'after' in req.query else None)
                 provider,session=req.query.get('activity_provider'),req.query.get('activity_thread')
                 if provider or session:value['activity']=s.store.recent_replies(provider or None,session or None)
-            elif action=='history':value=s.store.history(req.query['id'])
+            elif action=='history':value=s.store.history(req.query['id'],int(req.query['seq']) if 'seq' in req.query else None)
+            elif action=='search':value=s.store.search(req.query.get('q',''),req.query.get('provider') or None)
             elif action=='reply':
                 seq=req.query.get('seq','')
                 if not re.fullmatch(r'[1-9][0-9]{0,18}',seq):raise ValueError('Invalid reply number')

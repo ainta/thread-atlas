@@ -5,6 +5,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 import uuid
 from contextlib import contextmanager, nullcontext
 
@@ -103,6 +104,32 @@ CREATE TABLE IF NOT EXISTS todos(
 CREATE INDEX IF NOT EXISTS todo_group ON todos(group_id);
 """
 
+# Each entry upgrades a database from the version before it. `PRAGMA user_version` records how many have run.
+MIGRATIONS = ["""
+CREATE VIRTUAL TABLE messages_fts USING fts5(body,content='messages',content_rowid='seq',tokenize='porter unicode61 remove_diacritics 2');
+CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+ INSERT INTO messages_fts(rowid,body) VALUES(new.seq,new.body); END;
+CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+ INSERT INTO messages_fts(messages_fts,rowid,body) VALUES('delete',old.seq,old.body); END;
+CREATE TRIGGER messages_fts_update AFTER UPDATE OF body ON messages BEGIN
+ INSERT INTO messages_fts(messages_fts,rowid,body) VALUES('delete',old.seq,old.body);
+ INSERT INTO messages_fts(rowid,body) VALUES(new.seq,new.body); END;
+INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+"""]
+
+# The same stop words and suffix rules as `words()` in public/router.js, so search and routing agree on a term.
+STOPS = set(('the a an to on for at in my me this that from with it is was are be yesterday please work thread status latest then what where did we leave can you should run set change show find update policy project session 계속 오늘 어제 어디까지 상태 확인 현재 부탁 좀 해줘 알려줘 진행해 작업').split())
+PARTICLE = re.compile(r'^(.{2,}?)(에서|에게|으로|에는|에서의|의|에|을|를|는|은|이|가|로|까지)$')
+
+
+def terms(text):
+    raw=re.findall(r'[^\W_]+',unicodedata.normalize('NFKC',str(text or '').lower()))
+    out=[]
+    for w in raw:
+        w=re.sub(r'^([a-z]{3,})s$',r'\1',re.sub(r'^([a-z]{3,})ies$',r'\1y',PARTICLE.sub(r'\1',w)))
+        if len(w)>1 and w not in STOPS and w not in out:out.append(w)
+    return out
+
 
 class Store:
     def __init__(self, path):
@@ -115,6 +142,7 @@ class Store:
         self.db.executescript(STATUS_VIEWS)
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS root_project_name ON groups(name) WHERE parent_id IS NULL")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS child_project_name ON groups(parent_id, name) WHERE parent_id IS NOT NULL")
+        self.migrate()
         with self.tx():
             first_run = self.db.execute("INSERT OR IGNORE INTO prefs VALUES('baseline',?)", (str(time.time()),)).rowcount
             if first_run and not self.db.execute("SELECT 1 FROM groups UNION ALL SELECT 1 FROM sessions LIMIT 1").fetchone():
@@ -175,6 +203,15 @@ class Store:
             self.local.db=db
         return self.local.db
 
+    def migrate(self):
+        with self.tx():
+            version=self.db.execute("PRAGMA user_version").fetchone()[0]
+            statement=''
+            for line in ''.join(MIGRATIONS[version:]).splitlines(keepends=True):
+                statement+=line
+                if sqlite3.complete_statement(statement):self.db.execute(statement);statement=''
+            self.db.execute(f"PRAGMA user_version={len(MIGRATIONS)}")
+
     @contextmanager
     def tx(self):
         self.db.execute("BEGIN IMMEDIATE")
@@ -222,6 +259,8 @@ class Store:
             changes = json.loads(action["changes"])
             # Move a folder out of the way before restoring a placeholder's name at its destination.
             rows = sorted(changes["previous"].items(), key=lambda row: "parent_id" not in row[1])
+            blocked = False
+            self.db.execute("SAVEPOINT undo_restore")
             try:
                 for row_id, previous in rows:
                     fields = [field for field in WORKSPACE_FIELDS[table] if field in previous]
@@ -232,11 +271,17 @@ class Store:
                 if created and table in ("groups", "todos"):
                     placeholders = ",".join("?" for _ in created)
                     self.db.execute(f"DELETE FROM {table} WHERE id IN ({placeholders})", created)
-            except sqlite3.IntegrityError as error:
-                raise ValueError("Undo could not restore the previous folder layout because a folder is now in use.") from error
-            if table != "todos":
+            except sqlite3.IntegrityError:
+                # Leave the workspace as it is, but drop the entry so it does not block every earlier Undo.
+                self.db.execute("ROLLBACK TO undo_restore")
+                blocked = True
+            self.db.execute("RELEASE undo_restore")
+            if table != "todos" and not blocked:
                 self._cancel_unavailable_deliveries()
             self.db.execute("DELETE FROM workspace_undo WHERE seq=?", (expected,))
+        if blocked:
+            raise ValueError("Undo could not restore the previous folder layout because a folder is now in use. "
+                             "That change was removed from Undo.")
 
     def _project(self, key):
         if not isinstance(key, str):
@@ -624,11 +669,58 @@ class Store:
             if status != session["workspace_status"] or "group" in change:
                 self._cancel_unavailable_deliveries()
 
-    def history(self,key):
+    def history(self,key,seq=None):
+        """The latest 200 messages, or the 200 around `seq` when the thread is opened at an older message."""
         self.session_row(key)
+        target=seq is not None and self.db.execute("SELECT at,seq FROM messages WHERE session=? AND seq=?",(key,seq)).fetchone()
+        if not target:
+            return [dict(r) for r in self.db.execute("""SELECT seq,role,body,at FROM
+              (SELECT role,body,at,seq FROM messages WHERE session=? ORDER BY at DESC,seq DESC LIMIT 200)
+              ORDER BY at,seq""",(key,))]
+        at,seq=target
         return [dict(r) for r in self.db.execute("""SELECT seq,role,body,at FROM
-          (SELECT role,body,at,seq FROM messages WHERE session=? ORDER BY at DESC,seq DESC LIMIT 200)
-          ORDER BY at,seq""",(key,))]
+          (SELECT * FROM (SELECT role,body,at,seq FROM messages WHERE session=? AND (at<? OR at=? AND seq<=?) ORDER BY at DESC,seq DESC LIMIT 100)
+           UNION ALL SELECT * FROM (SELECT role,body,at,seq FROM messages WHERE session=? AND (at>? OR at=? AND seq>?) ORDER BY at,seq LIMIT 100))
+          ORDER BY at,seq""",(key,at,at,seq,key,at,at,seq))]
+
+    def search(self,text,provider=None):
+        """Visible sessions ranked by their best-matching message. Each comes with that message's excerpt, the query
+        terms it contains, and whether it is the session's latest reply."""
+        words=terms(text)
+        if not words:return []
+        # English terms are matched by their Porter stem; Korean terms by prefix, so particles still attached to the
+        # indexed word ("정책은") do not stop the bare term ("정책") from matching.
+        match=lambda ws:' OR '.join('"'+w+'"'+('' if w.isascii() else '*') for w in ws)
+        # The queries below read one snapshot, so an edit in between cannot drop a ranked message's excerpt.
+        self.db.execute("BEGIN")
+        try:
+            # Terms in over half the messages are skipped; when all are, the newest messages rank first.
+            total=self.db.execute("SELECT count(*) FROM messages").fetchone()[0]
+            distinct=[w for w in words if 2*self.db.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?",(match([w]),)).fetchone()[0]<=total]
+            query,order=(match(distinct),'f.rank') if distinct else (match(words),'f.rowid DESC')
+            best={}
+            # Hidden, excluded and trashed threads, including those inside a hidden or excluded folder, are left out.
+            suppressed={r[0] for r in self.db.execute(
+                f"SELECT id FROM session_statuses WHERE effective_status IN ({','.join('?'*len(SUPPRESSED_STATUSES))})",SUPPRESSED_STATUSES)}
+            rows=self.db.execute(f"""SELECT m.session,m.seq,m.role,m.at FROM messages_fts f JOIN messages m ON m.seq=f.rowid
+              JOIN sessions s ON s.id=m.session WHERE messages_fts MATCH ? AND (? IS NULL OR s.provider=?)
+              ORDER BY {order}""",(query,provider,provider))
+            for r in rows:
+                if r['session'] in best or r['session'] in suppressed:continue
+                best[r['session']]=dict(r)
+                if len(best)==20:break
+            rows.close()
+            found=list(best.values());seqs=[b['seq'] for b in found];marks=','.join('?'*len(seqs))
+            excerpts=dict(self.db.execute(f"""SELECT rowid,snippet(messages_fts,0,'','','…',32) FROM messages_fts
+              WHERE messages_fts MATCH ? AND rowid IN ({marks})""",(query,*seqs)))
+            held={w:{r[0] for r in self.db.execute(f"SELECT rowid FROM messages_fts WHERE messages_fts MATCH ? AND rowid IN ({marks})",(match([w]),*seqs))} for w in words}
+            # The latest reply is stored as text, so the newest assistant message with that text is the one it shows.
+            latest={r[0] for r in self.db.execute(f"""SELECT (SELECT m.seq FROM messages m WHERE m.session=s.id AND +m.role='assistant'
+              AND substr(m.body,1,2200)=s.latest ORDER BY m.at DESC,m.seq DESC LIMIT 1) FROM sessions s WHERE s.id IN ({marks})""",list(best))}
+        finally:self.db.execute("COMMIT")
+        for b in found:
+            b.update(snippet=excerpts[b['seq']],terms=[w for w in words if b['seq'] in held[w]],latest=b['seq'] in latest)
+        return found
 
     def alerts_after(self,after):
         limit=100

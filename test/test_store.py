@@ -478,6 +478,20 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(store.state()["undo"]["count"], 1)
         self.assertEqual(store.session_row(new_sid)["group_id"], store.group())
 
+    def test_undo_that_cannot_apply_is_dropped_instead_of_blocking_earlier_edits(self):
+        store = self.store
+        sid = store.session("Codex", "local", "research")
+        store.edit(sid, {"workspace_status": "active"})
+        project = store.create_project("Model evaluation", None)
+        # A thread filed into the new folder by an import keeps the folder in use.
+        store.db.execute("UPDATE sessions SET group_id=? WHERE id=?", (project, store.session("ChatGPT", "Personal", "plan")))
+        with self.assertRaisesRegex(ValueError, "removed from Undo"):
+            store.undo_workspace_edit(store.state()["undo"]["id"])
+        self.assertIn(project, [folder["id"] for folder in store.state()["groups"]])
+        self.assertEqual(store.state()["undo"]["count"], 1)
+        store.undo_workspace_edit(store.state()["undo"]["id"])
+        self.assertEqual(store.session_row(sid)["workspace_status"], "default")
+
     def test_move_past_empty_excluded_placeholder_keeps_both_projects(self):
         research = self.store.group("Research")
         placeholder = self.store.group("Thesis", research)
@@ -545,6 +559,19 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.session_row(imported)["group_id"], self.store.group("Unclassified"))
         self.assertEqual([message["body"] for message in self.store.history(imported)], ["Question", "Answer"])
         self.assertFalse(self.store.alerts_after(0)[0])
+
+    def test_codex_history_import_counts_a_malformed_thread_and_continues(self):
+        class AppServer:
+            async def call(self, method, params):
+                if method == "thread/list":
+                    return {"data": [{"id": "broken"}, {"id": "good"}], "nextCursor": None}
+                if params["threadId"] == "broken":
+                    return {"data": [{"turnId": "t1"}], "nextCursor": None}
+                item = {"type": "agentMessage", "id": "answer", "text": "Answer", "phase": "final_answer"}
+                return {"data": [{"item": item}], "nextCursor": None}
+
+        result = asyncio.run(import_codex_history(self.store, AppServer()))
+        self.assertEqual(result, {"added": 1, "already_indexed": 0, "failed": 1, "messages": 1})
 
     def test_new_local_and_web_sessions_share_unclassified_project(self):
         service = Service(self.root / "default-project", self.root, self.root, 12345)

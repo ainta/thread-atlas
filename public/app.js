@@ -1,4 +1,4 @@
-import {isActiveThread,route} from './router.js';
+import {isActiveThread,matchable,named,route} from './router.js';
 const $=id=>document.getElementById(id);
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const load=(key,def)=>{try{return JSON.parse(localStorage.getItem('atlas:'+key))??def;}catch{return def;}};
@@ -12,7 +12,8 @@ let showHidden=load('showHidden',false);
 let projects=new Map(),children=new Map();
 const PROJECT_INDENT_LIMIT=5;
 const WORKSPACE_STATUSES=['default','active','hidden','excluded'];
-let received=null,ready=false,polling=false,requestSeq=0,appliedSeq=0,dragging=null,lastPaint='',timer,undoing=false,draftID=load('draftID',null);
+let received=null,ready=false,polling=false,requestSeq=0,appliedSeq=0,dragging=null,lastPaint='',timer,searchTimer,undoing=false,draftID=load('draftID',null);
+let found={q:null,hits:[]};
 const l=(en,ko)=>lang==='ko'?ko:en;
 const labels={map:['Work map','작업 지도'],inbox:['Inbox','받은 답변'],default:['Default','기본'],active:['Active','진행 중'],hidden:['Hidden','숨김'],excluded:['Will not consider','고려 안 함'],trash:['Trash','휴지통'],undo:['Undo','실행 취소'],showHidden:['Show hidden','숨긴 세션 표시'],projects:['Projects','프로젝트'],connections:['Connections','연결 범위'],newGroup:['New project','새 프로젝트'],workspace:['Workspace','워크스페이스'],myWork:['My work','내 작업'],mainChat:['Main chat','메인 대화'],message:['Message','메시지'],send:['Send','보내기'],close:['Close','닫기'],
  updates:['Updates','업데이트'],todos:['To-dos','할 일'],showProjects:['Show projects','프로젝트 표시'],
@@ -503,13 +504,15 @@ function renderChatControls(){
   $('activityFeed').innerHTML=html;
  }
 }
-function plan(){return route($('prompt').value,state.sessions,focus,$('mode').value,locked);}
-const noActiveMatch=()=>l('No matching active thread. Mark a thread or folder Active, or choose a destination.',
+function plan(text,hits){return route(text,state.sessions,focus,$('mode').value,locked,hits);}
+async function search(q){const provider=named(q),hits=await api('search?q='+encodeURIComponent(q)+(provider?'&provider='+encodeURIComponent(provider):''));if(q===$('prompt').value.trim())found={q,hits};return hits;}
+const eligible=i=>Boolean(i)&&!i.hidden&&matchable(state.sessions).includes(i);
+const noActiveMatch=()=>!state.sessions.some(isActiveThread)?l('No matching thread. Choose a destination.','일치하는 스레드가 없습니다. 보낼 곳을 선택하세요.'):l('No matching active thread. Mark a thread or folder Active, or choose a destination.',
  '일치하는 진행 중 스레드가 없습니다. 스레드나 폴더를 진행 중으로 표시하거나 보낼 곳을 선택하세요.');
 function preview(){
  const value=$('prompt').value.trim(),target=item(focus);
- if(!value&&target&&!target.hidden&&(locked||isActiveThread(target))){$('dest').innerHTML='↳ '+escape(path(target))+' · '+escape(target.provider)+' <button type="button" data-clear>'+l('Clear','해제')+'</button>';return;}
- const p=value?plan():null;
+ if(!value&&target&&!target.hidden&&(locked||eligible(target))){$('dest').innerHTML='↳ '+escape(path(target))+' · '+escape(target.provider)+' <button type="button" data-clear>'+l('Clear','해제')+'</button>';return;}
+ const p=value?plan(value,found.q===value?found.hits:[]):null;
  $('dest').textContent=!p?'':!p.candidates.length?l('No matching active thread','일치하는 진행 중 스레드 없음'):
   !p.action?l('Search active threads','진행 중인 스레드 검색'):p.candidates.length!==1?l('Choose a destination','대상 선택'):
   p.confirm?l('Confirm before sending · ','전송 전 확인 · ')+path(p.candidates[0])+' · '+p.candidates[0].provider:
@@ -526,9 +529,9 @@ function renderChat(){
  const html=messages.map((m,n)=>{
   if(m.kind==='user')return '<div class="utter">'+escape(m.body)+'</div>';
   let h='';
-  if(m.kind==='source')h='<b>'+escape(m.path)+'</b><div class="quote"><span class="sub">'+escape(m.provider)+' · '+stamp(m.at)+'</span><p>'+escape(m.body)+'</p><button class="linkbtn" data-card="'+m.session+'">'+l('View source','원문 보기')+' ↗</button></div>';
+  if(m.kind==='source')h='<b>'+escape(m.path)+'</b>'+(m.match?'<div class="quote"><span class="sub">'+l('Matched message','일치한 메시지')+' · '+stamp(m.match.at)+'</span><p>'+escape(m.match.snippet)+'</p><button class="linkbtn" data-card="'+m.session+'" data-seq="'+m.match.seq+'">'+l('View source','원문 보기')+' ↗</button></div>':'')+'<div class="quote"><span class="sub">'+escape(m.provider)+' · '+stamp(m.at)+'</span><p>'+escape(m.body)+'</p><button class="linkbtn" data-card="'+m.session+'">'+l('View source','원문 보기')+' ↗</button></div>';
   if(m.kind==='choose'){
-   const candidates=m.ids.map(item).filter(i=>m.chosen?i?.id===m.chosen&&!i.hidden:isActiveThread(i));
+   const candidates=m.ids.map(item).filter(i=>m.chosen?i?.id===m.chosen&&!i.hidden:eligible(i));
    h=candidates.length?l('Which thread did you mean?','어느 스레드인가요?')+'<div class="replyopts">'+candidates.map(i=>
     '<button '+(m.chosen?'disabled':'')+' class="choice" data-select="'+i.id+'" data-n="'+n+'"><b>'+escape(path(i))+
     '</b> · '+escape(i.provider)+'<br>'+escape(i.latest.slice(0,125))+'</button>').join('')+'</div>':escape(noActiveMatch());
@@ -557,7 +560,7 @@ async function refresh(force=false){
   }
   received=s.cursor;ready=true;state=s;s.activityScope=scope;
   const target=item(focus);
-  if(focus&&(!target||target.hidden||(!locked&&!isActiveThread(target)))){
+  if(focus&&(!target||target.hidden||(!locked&&!eligible(target)))){
    focus=null;locked=false;save('target',null);save('locked',false);
   }
   const signature=JSON.stringify([s.scan,s.codex,s.claude,s.undo,s.folder_setup,s.groups,s.todos,s.inbox,scope,s.activity,s.deliveries,s.sessions.map(({live_at,synced_at,...i})=>i)]);
@@ -565,7 +568,7 @@ async function refresh(force=false){
 
  }catch(e){$('statusline').textContent=l('Disconnected · ','연결 끊김 · ')+e.message;}finally{polling=false;}
 }
-const historyMarkup=history=>history.map(m=>'<section><strong>'+escape(m.role)+'</strong> <small>'+stamp(m.at)+'</small><p>'+escape(m.body)+'</p></section>').join('');
+const historyMarkup=(history,seq)=>history.map(m=>'<section data-seq="'+m.seq+'"'+(seq&&String(m.seq)===String(seq)?' class="match"':'')+'><strong>'+escape(m.role)+'</strong> <small>'+stamp(m.at)+'</small><p>'+escape(m.body)+'</p></section>').join('');
 const threadRevision=(session,delivery)=>JSON.stringify([session.latest_at,session.latest,delivery?.status,delivery?.updated]);
 function updateThreadEditor(){
  const editor=threadEditor;
@@ -675,10 +678,11 @@ function wireThreadRename(id){
   return saveTitle(title);
  };
 }
-async function detail(id,replyNow=false){
- const i=item(id);if(!i)return;const history=await api('history?id='+encodeURIComponent(id));
+async function detail(id,replyNow=false,seq=null){
+ const i=item(id);if(!i)return;const history=await api('history?id='+encodeURIComponent(id)+(seq?'&seq='+seq:''));
  const trashed=i.trashed_at!=null;
- if(!trashed)await api('edit',{id,read:true,read_through:history.reduce((latest,m)=>Math.max(latest,m.seq??0),0)});
+ // A window around an older message leaves newer replies unseen.
+ if(!trashed&&!seq)await api('edit',{id,read:true,read_through:history.reduce((latest,m)=>Math.max(latest,m.seq??0),0)});
  const excluded=i.effective_status==='excluded';
  const location=i.workspace_status==='excluded'?text('excluded'):projectPath(i.group_id);
  const inherited=!trashed&&i.effective_status!==i.workspace_status
@@ -700,7 +704,7 @@ async function detail(id,replyNow=false){
   '<select id="workspaceStatus" aria-describedby="workspaceStatusHelp">'+workspaceStatusOptions(i.workspace_status)+'</select></label>'+
   '<div id="workspaceStatusHelp" class="sub">'+l('Hidden stays in its folder. Will not consider removes it from the tree and routing.','숨긴 세션은 프로젝트에 남고, 고려 안 함은 트리와 라우팅에서 빠집니다.')+'</div>'+
   inherited+move+'<p id="sessionEditError" class="sub" role="alert"></p>';
- const historyHtml=historyMarkup(history);
+ const historyHtml=historyMarkup(history,seq);
  const composer=i.hidden?'':'<form class="threadReply" id="threadReply" hidden>'+
   '<label for="threadReplyText">'+l('Reply to this thread','이 스레드에 답장')+'</label>'+
   '<div class="inputbox"><textarea id="threadReplyText" required maxlength="50000" rows="2"></textarea></div>'+
@@ -731,7 +735,8 @@ async function detail(id,replyNow=false){
   };
  }
  const hist=$('threadHistory');
- hist.scrollTop=hist.scrollHeight;
+ const match=hist.querySelector('.match');
+ if(match)match.scrollIntoView({block:'center'});else hist.scrollTop=hist.scrollHeight;
  if(composer){
   wireThreadReply(i,historyHtml);
   if(replyNow)showThreadReply();
@@ -947,22 +952,24 @@ async function queueReply(i,body,key,activeOnly=false){
  }
  return delivery;
 }
-async function handle(i,body,action,key,explicit=false){
+async function handle(i,body,action,key,explicit=false,match=null){
  if(!i||i.hidden)throw Error(l('Session unavailable','세션을 사용할 수 없습니다'));
- if(!explicit&&!isActiveThread(i))throw Error(noActiveMatch());
- if(!action){if(!locked)pin(i.id,false);push({kind:'source',session:i.id,path:path(i),provider:i.provider,at:i.latest_at,body:i.latest||l('No assistant reply yet.','아직 답변이 없습니다.')});return;}
+ if(!explicit&&!eligible(i))throw Error(noActiveMatch());
+ if(!action){if(!locked)pin(i.id,false);push({kind:'source',session:i.id,path:path(i),provider:i.provider,at:i.latest_at,body:i.latest||l('No assistant reply yet.','아직 답변이 없습니다.'),match:match&&!match.latest?match:null});return;}
  if(!i.direct){push({kind:'readonly',path:path(i),session:i.id,body});return;}
  await queueReply(i,body,key,!explicit);if(!locked)pin(i.id,false);await refresh(true);
 }
 $('composer').onsubmit=async e=>{
- e.preventDefault();const body=$('prompt').value.trim();if(!body)return;const p=plan();
+ e.preventDefault();const body=$('prompt').value.trim();if(!body)return;
  const key=draftID||crypto.randomUUID();draftID=key;save('draftID',key);
  const submit=$('composer').querySelector('[type=submit]');if(submit.disabled)return;submit.disabled=true;
  try{setChatView('conversation');
+  // Routing still works from titles and latest replies when full-history search is unavailable.
+  const hits=await search(body).catch(()=>[]),p=plan(body,hits),match=id=>hits.find(f=>f.session===id);
   if(!messages.some(m=>m.kind==='user'&&m.key===key))push({kind:'user',body,key});
   if(!p.candidates.length)push({kind:'info',body:noActiveMatch()});
-  else if(p.candidates.length===1&&!p.waiting&&!p.confirm)await handle(p.candidates[0],body,p.action,key,p.explicit);
-  else push({kind:'choose',ids:p.candidates.map(i=>i.id),body,action:p.action,key});
+  else if(p.candidates.length===1&&!p.waiting&&!p.confirm)await handle(p.candidates[0],body,p.action,key,p.explicit,match(p.candidates[0].id));
+  else push({kind:'choose',ids:p.candidates.map(i=>i.id),body,action:p.action,key,found:p.candidates.map(i=>match(i.id)).filter(Boolean)});
   if($('prompt').value.trim()===body){$('prompt').value='';save('draft','');draftID=null;save('draftID',null);}preview();
  }catch(err){toast(err.message);}finally{submit.disabled=false;}
 };
@@ -1062,7 +1069,7 @@ document.addEventListener('click',async e=>{
    window.scrollTo({top:0,left:0});
   }
   if(k.newSubproject)await createProject(k.newSubproject);
-  if(k.card)await detail(k.card);
+  if(k.card)await detail(k.card,false,k.seq);
   if(k.sessionStatus)await toggleCardStatus(b);
   if(k.markRead){
    b.disabled=true;
@@ -1081,7 +1088,7 @@ document.addEventListener('click',async e=>{
   if(k.trashSession||k.restoreTrash)await changeTrash(k.trashSession||k.restoreTrash,Boolean(k.trashSession),b);
   if(k.restoreProject)await updateProjectStatus(k.restoreProject,'default');
   if('clear' in k)selectChatTarget('');
-  if(k.select){const m=messages[Number(k.n)];if(m.chosen)return;m.chosen=k.select;renderChat();try{await handle(item(k.select),m.body,m.action,m.key);save('chat',messages);}catch(err){delete m.chosen;renderChat();throw err;}}
+  if(k.select){const m=messages[Number(k.n)];if(m.chosen)return;m.chosen=k.select;renderChat();try{await handle(item(k.select),m.body,m.action,m.key,false,m.found?.find(f=>f.session===k.select));save('chat',messages);}catch(err){delete m.chosen;renderChat();throw err;}}
   if('copy' in k)await navigator.clipboard.writeText(messages[Number(k.copy)].body);
   if(b.id==='closeDialog')$('dialog').close();
   if(b.id==='jumpToChat')$('chatPanel').scrollIntoView({block:'start',inline:'nearest'});
@@ -1136,7 +1143,8 @@ document.addEventListener('keydown',event=>{
   event.preventDefault();toggleTodoMemo(todoMemoProject);
  }
 });
-$('mode').onchange=preview;$('prompt').oninput=()=>{draftID=null;save('draftID',null);save('draft',$('prompt').value);preview();};
+$('mode').onchange=preview;$('prompt').oninput=()=>{draftID=null;save('draftID',null);save('draft',$('prompt').value);preview();
+ clearTimeout(searchTimer);const q=$('prompt').value.trim();if(q)searchTimer=setTimeout(()=>search(q).then(preview,()=>{}),250);};
 $('chatTarget').onchange=event=>selectChatTarget(event.target.value);
 $('activitySource').onchange=()=>{
  $('activityThread').value='';renderChatControls();refresh(true);

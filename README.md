@@ -66,7 +66,7 @@ Drag a thread onto a folder to move it. Drag a folder onto another folder to mov
 | **Hidden** | Hidden, or its original folder when **Show hidden** is on |
 | **Will not consider** | Its own sidebar view, with a **Restore** action |
 
-Set a thread's status from its card or details. Use the folder's **⋯** menu to set status for a branch. Visible threads in an active folder are eligible for automatic matching.
+Set a thread's status from its card or details. Use the folder's **⋯** menu to set status for a branch. Visible threads in an active folder are eligible for automatic matching. Until you mark any thread or folder Active, every visible thread is eligible.
 
 Open a thread and click **Rename** to give it a workspace title that survives sync. **Use original title** switches back to the source title. The trash-can button moves a thread to **Trash**, where you can restore it. **Undo** reverses the last 10 workspace edits one at a time, including renames, folder moves, and status changes.
 
@@ -84,7 +84,7 @@ In the right panel, use **Activity** to filter replies by source or thread. Choo
 | **Send to thread** with **Match active threads** | “Summarize the payment retry tests.” |
 | **Send to thread** with a specific **Destination** | Select **Payment retry policy** and type “Try a backoff of 500 ms.” |
 
-**Auto** chooses between finding and sending. Thread Atlas matches titles, project names, and recent replies, then previews the destination. It asks you to choose when the match is unclear. A specific destination can be any visible thread.
+**Auto** chooses between finding and sending. Thread Atlas matches titles, project names, recent replies, and every stored message, then previews the destination. It asks you to choose when the match is unclear, and asks before sending to a thread that only an older message matched. When **Find** matched an older message, the answer shows it with its time, and **View source** opens the history at that message. A specific destination can be any visible thread.
 
 ![Main chat showing a found reply and the destination preview for a follow-up](docs/main-chat.png)
 
